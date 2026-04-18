@@ -123,9 +123,51 @@ describe('loadConfig', () => {
     fs.writeFileSync(p, JSON.stringify([{ name: 'One', repo: 'o/one' }]));
     try {
       const cfg = loadConfig({ APPS_CONFIG_PATH: p });
-      expect(cfg.apps).toEqual([{ name: 'One', repo: 'o/one', url: undefined }]);
+      expect(cfg.apps).toEqual([
+        { name: 'One', repo: 'o/one', url: undefined, railwayLogsUrl: undefined },
+      ]);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+  });
+
+  it('defaults history db path + retention', () => {
+    const cfg = loadConfig({});
+    expect(cfg.historyDbPath).toBe('./data/history.db');
+    expect(cfg.historyRetentionDays).toBe(7);
+  });
+
+  it('applies history env overrides', () => {
+    const cfg = loadConfig({ HISTORY_DB_PATH: '/tmp/h.db', HISTORY_RETENTION_DAYS: '14' });
+    expect(cfg.historyDbPath).toBe('/tmp/h.db');
+    expect(cfg.historyRetentionDays).toBe(14);
+  });
+
+  it('applies APPS_RAILWAY_LOGS_OVERRIDES', () => {
+    const cfg = loadConfig({
+      APPS_RAILWAY_LOGS_OVERRIDES: '{"McSecretary":"https://railway.com/project/abc/service/def"}',
+    });
+    const ms = cfg.apps.find((a) => a.name === 'McSecretary');
+    expect(ms?.railwayLogsUrl).toBe('https://railway.com/project/abc/service/def');
+  });
+});
+
+describe('buildAppList railway logs overrides', () => {
+  it('applies railwayLogsUrl from overrides', () => {
+    const result = buildAppList(
+      [{ name: 'A', repo: 'x/a' }],
+      {},
+      { A: 'https://railway.com/project/p/service/s' },
+    );
+    expect(result[0].railwayLogsUrl).toBe('https://railway.com/project/p/service/s');
+  });
+
+  it('preserves existing railwayLogsUrl when not overridden', () => {
+    const result = buildAppList(
+      [{ name: 'A', repo: 'x/a', railwayLogsUrl: 'https://keep' }],
+      {},
+      {},
+    );
+    expect(result[0].railwayLogsUrl).toBe('https://keep');
   });
 });

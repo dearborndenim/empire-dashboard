@@ -10,16 +10,12 @@ export interface AppConfig {
   url?: string;
   /** Path to health endpoint. Defaults to /health */
   healthPath?: string;
-}
-
-export interface RuntimeConfig {
-  port: number;
-  githubToken?: string;
-  githubOwner: string;
-  healthCacheTtlSec: number;
-  healthTimeoutMs: number;
-  pollIntervalMs: number;
-  apps: AppConfig[];
+  /**
+   * Optional URL that jumps directly to this app's Railway logs/service page.
+   * When present the dashboard renders an active "logs" link; otherwise the
+   * link renders disabled.
+   */
+  railwayLogsUrl?: string;
 }
 
 /**
@@ -71,6 +67,7 @@ export function loadAppsFromFile(filePath: string): AppConfig[] {
       repo: item.repo,
       url: item.url,
       healthPath: item.healthPath,
+      railwayLogsUrl: item.railwayLogsUrl,
     };
   });
 }
@@ -78,11 +75,25 @@ export function loadAppsFromFile(filePath: string): AppConfig[] {
 export function buildAppList(
   base: AppConfig[],
   overrides: Record<string, string>,
+  railwayLogsOverrides: Record<string, string> = {},
 ): AppConfig[] {
   return base.map((app) => {
     const url = overrides[app.name] ?? app.url;
-    return { ...app, url };
+    const railwayLogsUrl = railwayLogsOverrides[app.name] ?? app.railwayLogsUrl;
+    return { ...app, url, railwayLogsUrl };
   });
+}
+
+export interface RuntimeConfig {
+  port: number;
+  githubToken?: string;
+  githubOwner: string;
+  healthCacheTtlSec: number;
+  healthTimeoutMs: number;
+  pollIntervalMs: number;
+  apps: AppConfig[];
+  historyDbPath: string;
+  historyRetentionDays: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig {
@@ -92,6 +103,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
   const pollIntervalMs = Number(env.POLL_INTERVAL_MS ?? 300000);
   const githubOwner = env.GITHUB_OWNER ?? 'dearborndenim';
   const githubToken = env.GITHUB_TOKEN || undefined;
+  const historyDbPath = env.HISTORY_DB_PATH ?? './data/history.db';
+  const historyRetentionDays = Number(env.HISTORY_RETENTION_DAYS ?? 7);
 
   let apps: AppConfig[] = DEFAULT_APPS;
   if (env.APPS_CONFIG_PATH) {
@@ -100,7 +113,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
       : path.resolve(process.cwd(), env.APPS_CONFIG_PATH);
     apps = loadAppsFromFile(resolved);
   }
-  apps = buildAppList(apps, parseUrlOverrides(env.APPS_URL_OVERRIDES));
+  apps = buildAppList(
+    apps,
+    parseUrlOverrides(env.APPS_URL_OVERRIDES),
+    parseUrlOverrides(env.APPS_RAILWAY_LOGS_OVERRIDES),
+  );
 
   return {
     port,
@@ -110,5 +127,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
     healthTimeoutMs,
     pollIntervalMs,
     apps,
+    historyDbPath,
+    historyRetentionDays,
   };
 }

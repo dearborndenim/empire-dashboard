@@ -1,5 +1,6 @@
 import { ActivityResult } from './activityTracker';
 import { HealthResult } from './healthChecker';
+import { SparklineCell } from './sparkline';
 
 export type StatusColor = 'green' | 'yellow' | 'red' | 'gray';
 
@@ -11,6 +12,12 @@ export interface AppStatus {
   activity: ActivityResult;
   /** Human-readable summary of why this app has the color it has. */
   summary: string;
+  /** Optional deep link to Railway logs for this service. */
+  railway_logs_url?: string;
+  /** Uptime percentage over the last 7 days, formatted like "99.2%". */
+  uptime_7d?: string | null;
+  /** 24 cells, oldest first, one per hour. */
+  sparkline_24h?: SparklineCell[];
 }
 
 export interface CombineOptions {

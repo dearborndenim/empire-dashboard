@@ -64,4 +64,58 @@ describe('renderDashboard', () => {
     expect(html).toContain('&lt;script&gt;');
     expect(html).toContain('&quot;oops&quot;');
   });
+
+  it('truncates long commit messages to 80 chars with ellipsis', () => {
+    const long: AppStatus[] = [
+      {
+        ...statuses[0],
+        activity: {
+          name: 'App One',
+          repo: 'o/one',
+          lastCommitMessage: 'feat: ' + 'x'.repeat(200),
+          hoursSinceCommit: 1,
+        },
+      },
+    ];
+    const html = renderDashboard(long, { generatedAt: 'x' });
+    expect(html).toContain('\u2026');
+    // Original long string should not appear verbatim.
+    expect(html).not.toContain('x'.repeat(100));
+  });
+
+  it('renders an active logs link when railway_logs_url is present', () => {
+    const withLogs: AppStatus[] = [
+      { ...statuses[0], railway_logs_url: 'https://railway.com/project/p/service/s' },
+    ];
+    const html = renderDashboard(withLogs, { generatedAt: 'x' });
+    expect(html).toMatch(/href="https:\/\/railway\.com\/project\/p\/service\/s"/);
+    expect(html).toContain('>logs<');
+  });
+
+  it('renders a disabled logs span when railway_logs_url is missing', () => {
+    const html = renderDashboard(statuses, { generatedAt: 'x' });
+    expect(html).toContain('card__logs--disabled');
+  });
+
+  it('renders uptime_7d and a sparkline of bar cells', () => {
+    const withHistory: AppStatus[] = [
+      {
+        ...statuses[0],
+        uptime_7d: '99.5%',
+        sparkline_24h: ['green', 'green', 'yellow', 'red', 'gray'].concat(
+          Array(19).fill('green'),
+        ) as AppStatus['sparkline_24h'],
+      },
+    ];
+    const html = renderDashboard(withHistory, { generatedAt: 'x' });
+    expect(html).toContain('7d 99.5%');
+    expect(html).toContain('spark__bar--green');
+    expect(html).toContain('spark__bar--red');
+    expect(html).toContain('card__spark');
+  });
+
+  it('shows an empty uptime placeholder when uptime_7d is missing', () => {
+    const html = renderDashboard(statuses, { generatedAt: 'x' });
+    expect(html).toContain('card__uptime--empty');
+  });
 });

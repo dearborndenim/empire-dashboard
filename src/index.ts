@@ -3,6 +3,7 @@ import { loadConfig } from './config';
 import { HealthChecker } from './healthChecker';
 import { ActivityTracker, createOctokitAdapter } from './activityTracker';
 import { createApp, collectStatuses } from './app';
+import { SqliteHistoryStore } from './historyStore';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -23,7 +24,18 @@ async function main(): Promise<void> {
     activityTracker = new ActivityTracker({ client: createOctokitAdapter(octokit) });
   }
 
-  const app = createApp({ config, healthChecker, activityTracker });
+  let historyStore: SqliteHistoryStore | undefined;
+  try {
+    historyStore = new SqliteHistoryStore({
+      filePath: config.historyDbPath,
+      retentionDays: config.historyRetentionDays,
+    });
+    console.log(`[empire-dashboard] history store: ${config.historyDbPath}`);
+  } catch (err) {
+    console.error('[empire-dashboard] history store disabled:', err);
+  }
+
+  const app = createApp({ config, healthChecker, activityTracker, historyStore });
 
   const server = app.listen(config.port, () => {
     console.log(`[empire-dashboard] listening on :${config.port}`);
@@ -33,7 +45,14 @@ async function main(): Promise<void> {
   // Warm the caches right away and then poll on interval.
   const refresh = async (): Promise<void> => {
     try {
-      await collectStatuses({ config, healthChecker, activityTracker }, { force: true });
+      await collectStatuses({ config, healthChecker, activityTracker, historyStore }, { force: true });
+      if (historyStore) {
+        try {
+          historyStore.pruneOlderThan(config.historyRetentionDays);
+        } catch (err) {
+          console.error('[empire-dashboard] prune failed:', err);
+        }
+      }
       console.log(`[empire-dashboard] refreshed statuses at ${new Date().toISOString()}`);
     } catch (err) {
       console.error('[empire-dashboard] refresh error:', err);
@@ -46,6 +65,9 @@ async function main(): Promise<void> {
   const shutdown = (signal: string): void => {
     console.log(`[empire-dashboard] ${signal} received, shutting down`);
     clearInterval(timer);
+    if (historyStore) {
+      try { historyStore.close(); } catch { /* ignore */ }
+    }
     server.close(() => process.exit(0));
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));

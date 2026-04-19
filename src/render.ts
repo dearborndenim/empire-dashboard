@@ -10,8 +10,65 @@ export function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
+export interface RenderIncident {
+  id: number;
+  app: string;
+  start: string;
+  end: string | null;
+  durationMin: number | null;
+  reason: string | null;
+  open: boolean;
+}
+
 export interface RenderOptions {
   generatedAt: string;
+  /** Recent incidents (closed or still-open) to surface in the sidebar panel. */
+  recentIncidents?: RenderIncident[];
+}
+
+export function formatIncidentDuration(minutes: number | null, open: boolean): string {
+  if (open) return 'ongoing';
+  if (typeof minutes !== 'number' || !Number.isFinite(minutes)) return '—';
+  if (minutes < 1) return '<1m';
+  if (minutes < 60) return `${Math.round(minutes)}m`;
+  const h = Math.floor(minutes / 60);
+  const m = Math.round(minutes % 60);
+  if (h < 24) return m === 0 ? `${h}h` : `${h}h${m}m`;
+  const d = Math.floor(h / 24);
+  const hr = h % 24;
+  return hr === 0 ? `${d}d` : `${d}d${hr}h`;
+}
+
+function renderIncidentsPanel(incidents: RenderIncident[] | undefined): string {
+  if (!incidents || incidents.length === 0) {
+    return `<section class="incidents">
+      <h2 class="incidents__title">Recent Incidents</h2>
+      <div class="incidents__empty">No incidents in the last 7 days.</div>
+    </section>`;
+  }
+  const rows = incidents
+    .map((inc) => {
+      const app = escapeHtml(inc.app);
+      const start = escapeHtml(inc.start);
+      const reason = escapeHtml(inc.reason ?? '');
+      const duration = escapeHtml(formatIncidentDuration(inc.durationMin, inc.open));
+      const statusClass = inc.open ? 'incident--open' : 'incident--closed';
+      const statusLabel = inc.open ? 'open' : 'closed';
+      return `<li class="incident ${statusClass}">
+        <span class="incident__app">${app}</span>
+        <span class="incident__reason">${reason}</span>
+        <span class="incident__start" title="${start}">${start}</span>
+        <span class="incident__duration">${duration}</span>
+        <span class="incident__status">${statusLabel}</span>
+      </li>`;
+    })
+    .join('\n');
+  return `<section class="incidents">
+    <h2 class="incidents__title">Recent Incidents <span class="incidents__count">(${incidents.length})</span></h2>
+    <ul class="incidents__list">
+${rows}
+    </ul>
+  </section>`;
 }
 
 function renderSparkline(cells: AppStatus['sparkline_24h']): string {
@@ -86,6 +143,7 @@ export function renderDashboard(statuses: AppStatus[], opts: RenderOptions): str
     <section class="grid">
 ${cards}
     </section>
+    ${renderIncidentsPanel(opts.recentIncidents)}
     <footer class="foot">
       <a href="/api/status">/api/status</a>
       &middot;

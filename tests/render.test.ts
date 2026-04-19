@@ -1,4 +1,4 @@
-import { escapeHtml, renderDashboard } from '../src/render';
+import { escapeHtml, renderDashboard, formatIncidentDuration } from '../src/render';
 import { AppStatus } from '../src/status';
 
 describe('escapeHtml', () => {
@@ -117,5 +117,75 @@ describe('renderDashboard', () => {
   it('shows an empty uptime placeholder when uptime_7d is missing', () => {
     const html = renderDashboard(statuses, { generatedAt: 'x' });
     expect(html).toContain('card__uptime--empty');
+  });
+
+  it('renders the recent incidents panel when incidents are provided', () => {
+    const html = renderDashboard(statuses, {
+      generatedAt: 'x',
+      recentIncidents: [
+        {
+          id: 1,
+          app: 'App Two',
+          start: '2026-04-18T00:00:00.000Z',
+          end: null,
+          durationMin: null,
+          reason: 'HTTP 502',
+          open: true,
+        },
+        {
+          id: 2,
+          app: 'App One',
+          start: '2026-04-17T00:00:00.000Z',
+          end: '2026-04-17T00:05:00.000Z',
+          durationMin: 5,
+          reason: 'HTTP 500',
+          open: false,
+        },
+      ],
+    });
+    expect(html).toContain('Recent Incidents');
+    expect(html).toContain('App Two');
+    expect(html).toContain('HTTP 502');
+    expect(html).toContain('incident--open');
+    expect(html).toContain('incident--closed');
+    expect(html).toContain('ongoing');
+    expect(html).toContain('5m');
+  });
+
+  it('renders an empty incidents message when list is empty', () => {
+    const html = renderDashboard(statuses, { generatedAt: 'x', recentIncidents: [] });
+    expect(html).toContain('No incidents in the last 7 days');
+  });
+
+  it('renders the empty state when recentIncidents is not supplied', () => {
+    const html = renderDashboard(statuses, { generatedAt: 'x' });
+    expect(html).toContain('No incidents in the last 7 days');
+  });
+});
+
+describe('formatIncidentDuration', () => {
+  it('returns "ongoing" when the incident is open', () => {
+    expect(formatIncidentDuration(10, true)).toBe('ongoing');
+    expect(formatIncidentDuration(null, true)).toBe('ongoing');
+  });
+
+  it('returns em-dash for null duration on closed incidents', () => {
+    expect(formatIncidentDuration(null, false)).toBe('\u2014');
+  });
+
+  it('formats sub-minute as <1m', () => {
+    expect(formatIncidentDuration(0.5, false)).toBe('<1m');
+  });
+
+  it('formats durations in m/h/d buckets', () => {
+    expect(formatIncidentDuration(5, false)).toBe('5m');
+    expect(formatIncidentDuration(60, false)).toBe('1h');
+    expect(formatIncidentDuration(90, false)).toBe('1h30m');
+    expect(formatIncidentDuration(24 * 60, false)).toBe('1d');
+    expect(formatIncidentDuration(25 * 60, false)).toBe('1d1h');
+  });
+
+  it('returns em-dash for non-finite input', () => {
+    expect(formatIncidentDuration(NaN, false)).toBe('\u2014');
   });
 });

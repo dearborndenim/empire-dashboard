@@ -168,6 +168,10 @@ describe('collectStatuses with history', () => {
       uptimePercent: jest.fn(() => null),
       bucketLastNHours: jest.fn(() => []),
       pruneOlderThan: jest.fn(() => 0),
+      openIncident: jest.fn(() => 1),
+      closeIncident: jest.fn(() => null),
+      getOpenIncident: jest.fn(() => null),
+      listIncidents: jest.fn(() => []),
       close: jest.fn(),
     };
     const enriched = { ...deps, historyStore: throwingStore };

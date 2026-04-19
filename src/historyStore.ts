@@ -28,6 +28,27 @@ export interface HourBucket {
   up: number;
 }
 
+/**
+ * Persisted incident row. `incident_end` is NULL while the incident is still
+ * open (i.e. the app is still red). `duration_min` is populated when the
+ * incident closes.
+ */
+export interface IncidentRow {
+  id: number;
+  app_name: string;
+  incident_start: string;
+  incident_end: string | null;
+  duration_min: number | null;
+  reason: string | null;
+}
+
+export interface IncidentsQuery {
+  days?: number;
+  app?: string;
+  limit?: number;
+  nowMs?: number;
+}
+
 export interface HistoryStoreOptions {
   filePath: string;
   retentionDays?: number;
@@ -43,6 +64,10 @@ export interface HistoryStore {
   uptimePercent(appName: string, windowHours: number, nowMs?: number): number | null;
   bucketLastNHours(appName: string, hours: number, nowMs?: number): HourBucket[];
   pruneOlderThan(days: number, nowMs?: number): number;
+  openIncident(appName: string, startedAtIso: string, reason: string | null): number;
+  closeIncident(appName: string, endedAtIso: string): IncidentRow | null;
+  getOpenIncident(appName: string): IncidentRow | null;
+  listIncidents(query?: IncidentsQuery): IncidentRow[];
   close(): void;
 }
 
@@ -77,6 +102,18 @@ export class SqliteHistoryStore implements HistoryStore {
       );
       CREATE INDEX IF NOT EXISTS idx_health_history_app_time
         ON health_history(app_name, checked_at);
+      CREATE TABLE IF NOT EXISTS incidents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        app_name TEXT NOT NULL,
+        incident_start TEXT NOT NULL,
+        incident_end TEXT,
+        duration_min REAL,
+        reason TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_incidents_app
+        ON incidents(app_name, incident_start);
+      CREATE INDEX IF NOT EXISTS idx_incidents_open
+        ON incidents(app_name, incident_end);
     `);
   }
 
@@ -162,6 +199,69 @@ export class SqliteHistoryStore implements HistoryStore {
       .prepare('DELETE FROM health_history WHERE checked_at < ?')
       .run(cutoff);
     return result.changes;
+  }
+
+  /**
+   * Start a new open incident row for `appName`. Returns the new row id.
+   * Callers are expected to only invoke this after `getOpenIncident` returns
+   * null — we don't enforce the invariant in SQL so it stays cheap.
+   */
+  openIncident(appName: string, startedAtIso: string, reason: string | null): number {
+    const result = this.db
+      .prepare(
+        'INSERT INTO incidents (app_name, incident_start, incident_end, duration_min, reason) VALUES (?, ?, NULL, NULL, ?)',
+      )
+      .run(appName, startedAtIso, reason);
+    return Number(result.lastInsertRowid);
+  }
+
+  /**
+   * Close the most recently opened incident for `appName` that is still open
+   * (incident_end IS NULL). Populates `incident_end` + `duration_min`.
+   * Returns the updated row, or null if no open incident existed.
+   */
+  closeIncident(appName: string, endedAtIso: string): IncidentRow | null {
+    const open = this.getOpenIncident(appName);
+    if (!open) return null;
+    const startMs = Date.parse(open.incident_start);
+    const endMs = Date.parse(endedAtIso);
+    const durationMin = Number.isFinite(startMs) && Number.isFinite(endMs)
+      ? Math.max(0, (endMs - startMs) / 60000)
+      : null;
+    this.db
+      .prepare('UPDATE incidents SET incident_end = ?, duration_min = ? WHERE id = ?')
+      .run(endedAtIso, durationMin, open.id);
+    return {
+      ...open,
+      incident_end: endedAtIso,
+      duration_min: durationMin,
+    };
+  }
+
+  getOpenIncident(appName: string): IncidentRow | null {
+    const row = this.db
+      .prepare(
+        'SELECT id, app_name, incident_start, incident_end, duration_min, reason FROM incidents WHERE app_name = ? AND incident_end IS NULL ORDER BY incident_start DESC LIMIT 1',
+      )
+      .get(appName) as IncidentRow | undefined;
+    return row ?? null;
+  }
+
+  listIncidents(query: IncidentsQuery = {}): IncidentRow[] {
+    const days = query.days ?? 7;
+    const limit = query.limit ?? 100;
+    const since = new Date((query.nowMs ?? this.now()) - days * 86400_000).toISOString();
+    const params: unknown[] = [];
+    let sql =
+      'SELECT id, app_name, incident_start, incident_end, duration_min, reason FROM incidents WHERE incident_start >= ?';
+    params.push(since);
+    if (query.app) {
+      sql += ' AND app_name = ?';
+      params.push(query.app);
+    }
+    sql += ' ORDER BY incident_start DESC LIMIT ?';
+    params.push(limit);
+    return this.db.prepare(sql).all(...params) as IncidentRow[];
   }
 
   close(): void {

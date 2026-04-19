@@ -7,7 +7,16 @@ touched. Yellow = up but idle. Red = down. Minimal, clean, fast — a v1
 monitor that we can layer features onto (alerting, incident history,
 per-user views) as the empire grows.
 
-## Current state — 68% (2026-04-17)
+## Current state — 74% (2026-04-18)
+- Per-app incident log in SQLite (`incidents` table: start/end/duration/reason)
+- `IncidentTracker` detects green->red / red->green transitions on each poll
+- `GET /api/incidents?days=N&app=NAME` JSON endpoint (back-compat, additive)
+- Weekly summary email (Mon 7 AM America/Chicago) — stdout stub transport today, SMTP-ready via `EmailSender` interface; env flag `EMAIL_DISABLED=1`
+- "Recent Incidents" panel on the HTML dashboard (last 10 rows, open/closed)
+- In-process `startWeeklyJob` scheduler (no node-cron dep), DST-aware via Intl.DateTimeFormat
+- 175 tests passing, 97.77% statement / 90.63% branch / 98.66% line coverage
+
+## Prior state — 68% (2026-04-17)
 - TypeScript + Express + Node 20 project scaffolded
 - HealthChecker: parallel HTTP probes with TTL cache and timeout
 - ActivityTracker: GitHub last-commit lookups via @octokit/rest with TTL cache
@@ -29,16 +38,30 @@ dearborn-ai-agents, DDA-CS-Manager, diamond-pickaxe-returns-processor.
 
 ## Iteration backlog
 - Wire up real Railway URLs via `APPS_URL_OVERRIDES` env var (and `APPS_RAILWAY_LOGS_OVERRIDES` for the logs links)
-- Alert to Telegram/Slack when a service flips green -> red
+- Real SMTP transport behind `EmailSender` (currently stubbed to stdout)
+- Alert to Telegram/Slack on each incident transition (reuse `IncidentTracker`)
 - Per-app drilldown page with recent commits + incident history
 - Auto-refresh the HTML page every 60s (or use SSE/polling on client)
 - Latency sparkline (response_ms) alongside the uptime sparkline
 - `last deploy` column from Railway API when available
+- Retention prune for `incidents` table (currently unbounded)
 
 ## Robert's Feedback
 _(none yet — newly built)_
 
 ## Build history
+### 2026-04-18 — polish v2 (incidents + weekly summary)
+- Feature branch `feature/polish-v2-incidents`, merged to `main`
+- `historyStore.ts`: new `incidents` table + `openIncident`/`closeIncident`/`getOpenIncident`/`listIncidents`
+- `incidentTracker.ts`: stateful up/down transition detector; rehydrates from any open incident on restart; treats `unknown` state as a non-transition
+- `email.ts`: `EmailSender` interface + `ConsoleEmailSender` stub (stdout). `selectEmailSender(env)` flags `EMAIL_DISABLED=1`
+- `weeklyReport.ts`: `buildWeeklyReportData`, `renderWeeklyReportText`, `sendWeeklyReport`; rollup + top-3-downtime helpers
+- `scheduler.ts`: `startWeeklyJob` / `msUntilNextWeeklyRun` / `partsInZone` — DST-aware without pulling node-cron
+- `app.ts`: `/api/incidents` endpoint, incident tracker wiring in `collectStatuses`, recent incidents passed to `renderDashboard`
+- `render.ts`: Recent Incidents panel + `formatIncidentDuration` helper + scoped CSS
+- Tests added: `historyStore.incidents.test.ts`, `incidentTracker.test.ts`, `email.test.ts`, `weeklyReport.test.ts`, `scheduler.test.ts`, `app.incidents.test.ts`, render additions
+- 71 new tests (104 -> 175), coverage 97.77%/90.63%/98.66%, all green
+
 ### 2026-04-17 — polish + expand
 - Feature branch `feature/dashboard-polish-expand` merged to main
 - New `truncateMessage()` helper — commit messages now cap at 80 chars with an ellipsis

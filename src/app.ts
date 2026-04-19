@@ -5,14 +5,16 @@ import { HealthChecker } from './healthChecker';
 import { ActivityTracker } from './activityTracker';
 import { combineStatus, AppStatus } from './status';
 import { renderDashboard } from './render';
-import { HistoryStore, SampleStatus } from './historyStore';
+import { HistoryStore, SampleStatus, IncidentRow } from './historyStore';
 import { bucketsToSparkline, formatUptimePercent } from './sparkline';
+import { IncidentTracker } from './incidentTracker';
 
 export interface AppDeps {
   config: RuntimeConfig;
   healthChecker: HealthChecker;
   activityTracker: ActivityTracker;
   historyStore?: HistoryStore;
+  incidentTracker?: IncidentTracker;
 }
 
 /**
@@ -26,7 +28,7 @@ function toSampleStatus(state: string): SampleStatus {
 }
 
 export async function collectStatuses(deps: AppDeps, opts: { force?: boolean } = {}): Promise<AppStatus[]> {
-  const { config, healthChecker, activityTracker, historyStore } = deps;
+  const { config, healthChecker, activityTracker, historyStore, incidentTracker } = deps;
   const [healths, activities] = await Promise.all([
     healthChecker.checkAll(config.apps, opts),
     activityTracker.trackAll(config.apps, opts),
@@ -50,6 +52,16 @@ export async function collectStatuses(deps: AppDeps, opts: { force?: boolean } =
       // Don't take the dashboard down if SQLite misbehaves.
       // eslint-disable-next-line no-console
       console.error('[empire-dashboard] history insert failed:', err);
+    }
+  }
+
+  // Detect green->red / red->green transitions and persist incidents.
+  if (incidentTracker) {
+    try {
+      incidentTracker.processBatch(healths);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[empire-dashboard] incident tracker failed:', err);
     }
   }
 
@@ -81,6 +93,31 @@ export async function collectStatuses(deps: AppDeps, opts: { force?: boolean } =
   });
 }
 
+/**
+ * Fetch and serialize recent incidents. Safely returns [] if the history
+ * store is unavailable. Centralised so both the HTML and JSON paths use the
+ * same shape.
+ */
+export function serializeIncidents(rows: IncidentRow[]): Array<{
+  id: number;
+  app: string;
+  start: string;
+  end: string | null;
+  durationMin: number | null;
+  reason: string | null;
+  open: boolean;
+}> {
+  return rows.map((r) => ({
+    id: r.id,
+    app: r.app_name,
+    start: r.incident_start,
+    end: r.incident_end,
+    durationMin: r.duration_min,
+    reason: r.reason,
+    open: r.incident_end === null,
+  }));
+}
+
 export function createApp(deps: AppDeps): Express {
   const app = express();
 
@@ -107,10 +144,54 @@ export function createApp(deps: AppDeps): Express {
     }
   });
 
+  app.get('/api/incidents', (req, res) => {
+    try {
+      if (!deps.historyStore) {
+        res.json({ generatedAt: new Date().toISOString(), count: 0, incidents: [] });
+        return;
+      }
+      const daysRaw = req.query.days;
+      let days = 7;
+      if (typeof daysRaw === 'string') {
+        const parsed = Number(daysRaw);
+        if (Number.isFinite(parsed)) {
+          days = Math.max(1, Math.min(90, parsed));
+        }
+      }
+      const appName = typeof req.query.app === 'string' ? req.query.app : undefined;
+      const rows = deps.historyStore.listIncidents({ days, app: appName });
+      const incidents = serializeIncidents(rows);
+      res.json({
+        generatedAt: new Date().toISOString(),
+        windowDays: days,
+        count: incidents.length,
+        incidents,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
   app.get('/', async (_req, res) => {
     try {
       const statuses = await collectStatuses(deps);
-      const html = renderDashboard(statuses, { generatedAt: new Date().toISOString() });
+      let recentIncidents: ReturnType<typeof serializeIncidents> = [];
+      if (deps.historyStore) {
+        try {
+          recentIncidents = serializeIncidents(
+            deps.historyStore.listIncidents({ days: 7, limit: 10 }),
+          );
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error('[empire-dashboard] incident read failed:', err);
+        }
+      }
+      const html = renderDashboard(statuses, {
+        generatedAt: new Date().toISOString(),
+        recentIncidents,
+      });
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(html);
     } catch (err) {

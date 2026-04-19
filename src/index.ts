@@ -4,6 +4,10 @@ import { HealthChecker } from './healthChecker';
 import { ActivityTracker, createOctokitAdapter } from './activityTracker';
 import { createApp, collectStatuses } from './app';
 import { SqliteHistoryStore } from './historyStore';
+import { IncidentTracker } from './incidentTracker';
+import { selectEmailSender } from './email';
+import { sendWeeklyReport } from './weeklyReport';
+import { startWeeklyJob } from './scheduler';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -35,7 +39,21 @@ async function main(): Promise<void> {
     console.error('[empire-dashboard] history store disabled:', err);
   }
 
-  const app = createApp({ config, healthChecker, activityTracker, historyStore });
+  let incidentTracker: IncidentTracker | undefined;
+  if (historyStore) {
+    incidentTracker = new IncidentTracker({
+      store: historyStore,
+      appNames: config.apps.map((a) => a.name),
+    });
+  }
+
+  // Email transport selection — stubbed to stdout unless future SMTP wiring.
+  const emailSelection = selectEmailSender(process.env);
+  console.log(
+    `[empire-dashboard] email transport: ${emailSelection.transport}${emailSelection.disabled ? ' (EMAIL_DISABLED=1)' : ''}`,
+  );
+
+  const app = createApp({ config, healthChecker, activityTracker, historyStore, incidentTracker });
 
   const server = app.listen(config.port, () => {
     console.log(`[empire-dashboard] listening on :${config.port}`);
@@ -45,7 +63,10 @@ async function main(): Promise<void> {
   // Warm the caches right away and then poll on interval.
   const refresh = async (): Promise<void> => {
     try {
-      await collectStatuses({ config, healthChecker, activityTracker, historyStore }, { force: true });
+      await collectStatuses(
+        { config, healthChecker, activityTracker, historyStore, incidentTracker },
+        { force: true },
+      );
       if (historyStore) {
         try {
           historyStore.pruneOlderThan(config.historyRetentionDays);
@@ -62,9 +83,39 @@ async function main(): Promise<void> {
   void refresh();
   const timer = setInterval(() => void refresh(), config.pollIntervalMs);
 
+  // Weekly summary email — Monday 7 AM CT (America/Chicago).
+  const weeklyReportTo = process.env.WEEKLY_REPORT_TO ?? 'rob@dearborndenim.com';
+  const weeklyReportFrom = process.env.WEEKLY_REPORT_FROM;
+  let weeklyJob: { stop(): void } | undefined;
+  if (historyStore) {
+    weeklyJob = startWeeklyJob({
+      name: 'weekly-report',
+      dayOfWeek: 1,
+      hourLocal: 7,
+      timezone: 'America/Chicago',
+      run: async () => {
+        try {
+          const result = await sendWeeklyReport({
+            apps: config.apps,
+            store: historyStore!,
+            sender: emailSelection.sender,
+            to: weeklyReportTo,
+            from: weeklyReportFrom,
+          });
+          console.log(
+            `[empire-dashboard] weekly report sent via ${result.transport} (incidents=${result.data.incidentCount})`,
+          );
+        } catch (err) {
+          console.error('[empire-dashboard] weekly report failed:', err);
+        }
+      },
+    });
+  }
+
   const shutdown = (signal: string): void => {
     console.log(`[empire-dashboard] ${signal} received, shutting down`);
     clearInterval(timer);
+    if (weeklyJob) weeklyJob.stop();
     if (historyStore) {
       try { historyStore.close(); } catch { /* ignore */ }
     }

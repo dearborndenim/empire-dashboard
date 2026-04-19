@@ -171,6 +171,60 @@ html, body {
   cursor: not-allowed;
 }
 
+.incidents {
+  margin-top: 28px;
+  padding: 16px 18px;
+  background: #14171c;
+  border: 1px solid #232830;
+  border-radius: 10px;
+}
+
+.incidents__title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #e8eaed;
+}
+
+.incidents__count {
+  color: #7c8189;
+  font-weight: 400;
+  margin-left: 4px;
+}
+
+.incidents__empty {
+  font-size: 12px;
+  color: #7c8189;
+}
+
+.incidents__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.incident {
+  display: grid;
+  grid-template-columns: 1.4fr 1.2fr 1.6fr 0.6fr 0.6fr;
+  gap: 10px;
+  padding: 6px 0;
+  font-size: 12px;
+  border-top: 1px solid #1d2027;
+}
+
+.incident:first-child { border-top: 0; }
+
+.incident__app { color: #e8eaed; font-weight: 600; }
+.incident__reason { color: #b0b5bd; }
+.incident__start { color: #7c8189; font-variant-numeric: tabular-nums; }
+.incident__duration { color: #9aa0a8; font-variant-numeric: tabular-nums; }
+.incident__status { text-align: right; font-weight: 600; }
+
+.incident--open .incident__status { color: #f26d6d; }
+.incident--closed .incident__status { color: #42d67c; }
+
 .foot {
   margin-top: 32px;
   font-size: 12px;

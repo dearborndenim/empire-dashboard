@@ -40,6 +40,18 @@ export interface IncidentRow {
   incident_end: string | null;
   duration_min: number | null;
   reason: string | null;
+  notes?: IncidentNote[];
+}
+
+/**
+ * Single manual note appended by an operator (Robert) on an incident row.
+ * Stored in a separate `incident_notes` table keyed by `incident_id`.
+ */
+export interface IncidentNote {
+  id: number;
+  incident_id: number;
+  at: string;
+  note: string;
 }
 
 export interface IncidentsQuery {
@@ -47,6 +59,8 @@ export interface IncidentsQuery {
   app?: string;
   limit?: number;
   nowMs?: number;
+  /** When true, include notes joined onto each incident row. */
+  includeNotes?: boolean;
 }
 
 export interface HistoryStoreOptions {
@@ -64,10 +78,14 @@ export interface HistoryStore {
   uptimePercent(appName: string, windowHours: number, nowMs?: number): number | null;
   bucketLastNHours(appName: string, hours: number, nowMs?: number): HourBucket[];
   pruneOlderThan(days: number, nowMs?: number): number;
+  pruneIncidents(retentionDays: number, nowMs?: number): number;
   openIncident(appName: string, startedAtIso: string, reason: string | null): number;
   closeIncident(appName: string, endedAtIso: string): IncidentRow | null;
   getOpenIncident(appName: string): IncidentRow | null;
   listIncidents(query?: IncidentsQuery): IncidentRow[];
+  getIncidentById(id: number): IncidentRow | null;
+  addIncidentNote(incidentId: number, note: string, atIso?: string): IncidentNote | null;
+  getIncidentNotes(incidentId: number): IncidentNote[];
   close(): void;
 }
 
@@ -114,6 +132,14 @@ export class SqliteHistoryStore implements HistoryStore {
         ON incidents(app_name, incident_start);
       CREATE INDEX IF NOT EXISTS idx_incidents_open
         ON incidents(app_name, incident_end);
+      CREATE TABLE IF NOT EXISTS incident_notes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        incident_id INTEGER NOT NULL,
+        at TEXT NOT NULL,
+        note TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_incident_notes_incident
+        ON incident_notes(incident_id, at);
     `);
   }
 
@@ -202,6 +228,37 @@ export class SqliteHistoryStore implements HistoryStore {
   }
 
   /**
+   * Prune closed incidents older than `retentionDays`. Still-open incidents
+   * (`incident_end IS NULL`) are always retained so an active outage is never
+   * silently deleted. Associated notes are cascade-deleted along with the
+   * incident row. Returns the number of incidents removed.
+   */
+  pruneIncidents(retentionDays: number, nowMs?: number): number {
+    const cutoff = new Date(
+      (nowMs ?? this.now()) - retentionDays * 86400_000,
+    ).toISOString();
+    const run = this.db.transaction(() => {
+      // Find incidents eligible for prune (closed and ended before cutoff).
+      const eligible = this.db
+        .prepare(
+          'SELECT id FROM incidents WHERE incident_end IS NOT NULL AND incident_end < ?',
+        )
+        .all(cutoff) as Array<{ id: number }>;
+      if (eligible.length === 0) return 0;
+      const ids = eligible.map((r) => r.id);
+      const placeholders = ids.map(() => '?').join(',');
+      this.db
+        .prepare(`DELETE FROM incident_notes WHERE incident_id IN (${placeholders})`)
+        .run(...ids);
+      const res = this.db
+        .prepare(`DELETE FROM incidents WHERE id IN (${placeholders})`)
+        .run(...ids);
+      return res.changes;
+    });
+    return run();
+  }
+
+  /**
    * Start a new open incident row for `appName`. Returns the new row id.
    * Callers are expected to only invoke this after `getOpenIncident` returns
    * null — we don't enforce the invariant in SQL so it stays cheap.
@@ -261,7 +318,55 @@ export class SqliteHistoryStore implements HistoryStore {
     }
     sql += ' ORDER BY incident_start DESC LIMIT ?';
     params.push(limit);
-    return this.db.prepare(sql).all(...params) as IncidentRow[];
+    const rows = this.db.prepare(sql).all(...params) as IncidentRow[];
+    if (query.includeNotes) {
+      for (const row of rows) {
+        row.notes = this.getIncidentNotes(row.id);
+      }
+    }
+    return rows;
+  }
+
+  /** Fetch a single incident row by id, or null if it doesn't exist. */
+  getIncidentById(id: number): IncidentRow | null {
+    const row = this.db
+      .prepare(
+        'SELECT id, app_name, incident_start, incident_end, duration_min, reason FROM incidents WHERE id = ?',
+      )
+      .get(id) as IncidentRow | undefined;
+    return row ?? null;
+  }
+
+  /**
+   * Append a manual note to an incident. Returns the new note row, or null
+   * if the incident id doesn't exist. `atIso` defaults to now().
+   */
+  addIncidentNote(
+    incidentId: number,
+    note: string,
+    atIso?: string,
+  ): IncidentNote | null {
+    if (!this.getIncidentById(incidentId)) return null;
+    const at = atIso ?? new Date(this.now()).toISOString();
+    const result = this.db
+      .prepare(
+        'INSERT INTO incident_notes (incident_id, at, note) VALUES (?, ?, ?)',
+      )
+      .run(incidentId, at, note);
+    return {
+      id: Number(result.lastInsertRowid),
+      incident_id: incidentId,
+      at,
+      note,
+    };
+  }
+
+  getIncidentNotes(incidentId: number): IncidentNote[] {
+    return this.db
+      .prepare(
+        'SELECT id, incident_id, at, note FROM incident_notes WHERE incident_id = ? ORDER BY at ASC, id ASC',
+      )
+      .all(incidentId) as IncidentNote[];
   }
 
   close(): void {

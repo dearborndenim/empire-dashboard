@@ -161,6 +161,78 @@ describe('renderDashboard', () => {
     const html = renderDashboard(statuses, { generatedAt: 'x' });
     expect(html).toContain('No incidents in the last 7 days');
   });
+
+  it('renders integration tiles when supplied', () => {
+    const html = renderDashboard(statuses, {
+      generatedAt: 'x',
+      integrationTiles: [
+        {
+          id: 'po-receiver',
+          title: 'PO Receiver Webhooks',
+          state: 'ok',
+          summary: '99.1% success',
+          details: [{ label: 'Success', value: '99.1%' }],
+        },
+        {
+          id: 'kanban',
+          title: 'Kanban Inbound Webhooks',
+          state: 'not-configured',
+          summary: 'Not configured',
+        },
+      ],
+    });
+    expect(html).toContain('Integrations');
+    expect(html).toContain('PO Receiver Webhooks');
+    expect(html).toContain('Kanban Inbound Webhooks');
+    expect(html).toContain('tile--ok');
+    expect(html).toContain('tile--not-configured');
+    expect(html).toContain('99.1% success');
+    expect(html).toContain('Not configured');
+  });
+
+  it('omits the integrations section when tiles is undefined or empty', () => {
+    const html = renderDashboard(statuses, { generatedAt: 'x' });
+    expect(html).not.toContain('Integrations');
+    const html2 = renderDashboard(statuses, { generatedAt: 'x', integrationTiles: [] });
+    expect(html2).not.toContain('Integrations');
+  });
+
+  it('renders incident notes inline when present', () => {
+    const html = renderDashboard(statuses, {
+      generatedAt: 'x',
+      recentIncidents: [
+        {
+          id: 9,
+          app: 'App One',
+          start: '2026-04-18T00:00:00.000Z',
+          end: null,
+          durationMin: null,
+          reason: 'HTTP 502',
+          open: true,
+          notes: [{ at: '2026-04-18T00:05:00.000Z', note: 'rolled back deploy' }],
+        },
+      ],
+    });
+    expect(html).toContain('rolled back deploy');
+    expect(html).toContain('incident__notes');
+  });
+
+  it('renders tile error banner when tile has error state', () => {
+    const html = renderDashboard(statuses, {
+      generatedAt: 'x',
+      integrationTiles: [
+        {
+          id: 'po-receiver',
+          title: 'PO Receiver Webhooks',
+          state: 'error',
+          summary: 'Error fetching integration status',
+          error: 'HTTP 500',
+        },
+      ],
+    });
+    expect(html).toContain('tile--error');
+    expect(html).toContain('HTTP 500');
+  });
 });
 
 describe('formatIncidentDuration', () => {

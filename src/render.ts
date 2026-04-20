@@ -1,5 +1,6 @@
 import { AppStatus } from './status';
 import { truncateMessage } from './truncate';
+import { IntegrationTile } from './integrationTiles';
 
 export function escapeHtml(value: string): string {
   return value
@@ -10,6 +11,11 @@ export function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
+export interface RenderIncidentNote {
+  at: string;
+  note: string;
+}
+
 export interface RenderIncident {
   id: number;
   app: string;
@@ -18,12 +24,15 @@ export interface RenderIncident {
   durationMin: number | null;
   reason: string | null;
   open: boolean;
+  notes?: RenderIncidentNote[];
 }
 
 export interface RenderOptions {
   generatedAt: string;
   /** Recent incidents (closed or still-open) to surface in the sidebar panel. */
   recentIncidents?: RenderIncident[];
+  /** Integration observability tiles (PO receiver, kanban inbound, etc.). */
+  integrationTiles?: IntegrationTile[];
 }
 
 export function formatIncidentDuration(minutes: number | null, open: boolean): string {
@@ -54,12 +63,23 @@ function renderIncidentsPanel(incidents: RenderIncident[] | undefined): string {
       const duration = escapeHtml(formatIncidentDuration(inc.durationMin, inc.open));
       const statusClass = inc.open ? 'incident--open' : 'incident--closed';
       const statusLabel = inc.open ? 'open' : 'closed';
+      const notes = (inc.notes ?? [])
+        .map((n) => {
+          const at = escapeHtml(n.at);
+          const body = escapeHtml(n.note);
+          return `<li class="incident__note"><span class="incident__note-at">${at}</span> <span class="incident__note-body">${body}</span></li>`;
+        })
+        .join('');
+      const notesBlock = notes
+        ? `<ul class="incident__notes">${notes}</ul>`
+        : '';
       return `<li class="incident ${statusClass}">
         <span class="incident__app">${app}</span>
         <span class="incident__reason">${reason}</span>
         <span class="incident__start" title="${start}">${start}</span>
         <span class="incident__duration">${duration}</span>
         <span class="incident__status">${statusLabel}</span>
+        ${notesBlock}
       </li>`;
     })
     .join('\n');
@@ -68,6 +88,40 @@ function renderIncidentsPanel(incidents: RenderIncident[] | undefined): string {
     <ul class="incidents__list">
 ${rows}
     </ul>
+  </section>`;
+}
+
+function renderIntegrationTiles(tiles: IntegrationTile[] | undefined): string {
+  if (!tiles || tiles.length === 0) return '';
+  const cards = tiles
+    .map((tile) => {
+      const title = escapeHtml(tile.title);
+      const summary = escapeHtml(tile.summary);
+      const stateClass = `tile tile--${tile.state}`;
+      const details = (tile.details ?? [])
+        .map((d) => {
+          return `<li class="tile__detail"><span class="tile__detail-label">${escapeHtml(d.label)}</span> <span class="tile__detail-value">${escapeHtml(d.value)}</span></li>`;
+        })
+        .join('');
+      const detailsBlock = details
+        ? `<ul class="tile__details">${details}</ul>`
+        : '';
+      const errorBlock = tile.error
+        ? `<div class="tile__error">${escapeHtml(tile.error)}</div>`
+        : '';
+      return `<div class="${stateClass}">
+        <div class="tile__title">${title}</div>
+        <div class="tile__summary">${summary}</div>
+        ${detailsBlock}
+        ${errorBlock}
+      </div>`;
+    })
+    .join('\n');
+  return `<section class="tiles">
+    <h2 class="tiles__title">Integrations</h2>
+    <div class="tiles__grid">
+${cards}
+    </div>
   </section>`;
 }
 
@@ -143,6 +197,7 @@ export function renderDashboard(statuses: AppStatus[], opts: RenderOptions): str
     <section class="grid">
 ${cards}
     </section>
+    ${renderIntegrationTiles(opts.integrationTiles)}
     ${renderIncidentsPanel(opts.recentIncidents)}
     <footer class="foot">
       <a href="/api/status">/api/status</a>

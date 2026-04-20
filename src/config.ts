@@ -94,6 +94,8 @@ export interface RuntimeConfig {
   apps: AppConfig[];
   historyDbPath: string;
   historyRetentionDays: number;
+  incidentsRetentionDays: number;
+  incidentsAdminToken?: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig {
@@ -105,6 +107,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
   const githubToken = env.GITHUB_TOKEN || undefined;
   const historyDbPath = env.HISTORY_DB_PATH ?? './data/history.db';
   const historyRetentionDays = Number(env.HISTORY_RETENTION_DAYS ?? 7);
+  const incidentsRetentionRaw = Number(env.INCIDENTS_RETENTION_DAYS ?? 30);
+  const incidentsRetentionDays =
+    Number.isFinite(incidentsRetentionRaw) && incidentsRetentionRaw > 0
+      ? incidentsRetentionRaw
+      : 30;
+  const incidentsAdminToken = env.INCIDENTS_ADMIN_TOKEN || undefined;
 
   let apps: AppConfig[] = DEFAULT_APPS;
   if (env.APPS_CONFIG_PATH) {
@@ -129,5 +137,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
     apps,
     historyDbPath,
     historyRetentionDays,
+    incidentsRetentionDays,
+    incidentsAdminToken,
   };
 }

@@ -113,6 +113,79 @@ export interface StartWeeklyJobOptions extends WeeklyScheduleOptions {
   clearTimer?: (handle: unknown) => void;
 }
 
+export interface DailyScheduleOptions {
+  /** 0-23 hour in wall-clock of `timezone`. */
+  hourLocal: number;
+  /** IANA timezone id, e.g. "America/Chicago". */
+  timezone: string;
+  now?: () => number;
+}
+
+/**
+ * Compute milliseconds until the next daily occurrence of `hourLocal:00` in
+ * `timezone`, strictly greater than zero.
+ */
+export function msUntilNextDailyRun(opts: DailyScheduleOptions): number {
+  const now = opts.now ? opts.now() : Date.now();
+  const stepMs = 60_000;
+  const start = Math.ceil((now + 1) / stepMs) * stepMs;
+  const maxSteps = 2 * 24 * 60; // 2 days of minutes — safe upper bound
+  for (let i = 0; i < maxSteps; i++) {
+    const candidate = start + i * stepMs;
+    const parts = partsInZone(candidate, opts.timezone);
+    if (parts.hour === opts.hourLocal && parts.minute === 0) {
+      return candidate - now;
+    }
+  }
+  return 24 * 3600_000;
+}
+
+export interface DailyJobHandle {
+  stop(): void;
+}
+
+export interface StartDailyJobOptions extends DailyScheduleOptions {
+  name: string;
+  run: () => Promise<void> | void;
+  onError?: (err: unknown) => void;
+  setTimer?: (fn: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
+}
+
+/**
+ * Start a daily job that fires at `hourLocal` in `timezone`. Returned handle
+ * can be used to stop it. Swallows errors from `run` via `onError`.
+ */
+export function startDailyJob(opts: StartDailyJobOptions): DailyJobHandle {
+  const setT = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+  const clearT = opts.clearTimer ?? ((h) => clearTimeout(h as NodeJS.Timeout));
+  const onError = opts.onError ?? ((err) => console.error(`[scheduler] ${opts.name} error:`, err));
+
+  let timer: unknown = null;
+  let stopped = false;
+
+  const schedule = (): void => {
+    if (stopped) return;
+    const delay = msUntilNextDailyRun(opts);
+    timer = setT(() => {
+      Promise.resolve()
+        .then(() => opts.run())
+        .catch((err) => onError(err))
+        .finally(() => schedule());
+    }, delay);
+  };
+
+  schedule();
+
+  return {
+    stop(): void {
+      stopped = true;
+      if (timer !== null) clearT(timer);
+      timer = null;
+    },
+  };
+}
+
 /**
  * Start a weekly job. The returned handle can be used to stop it.
  */

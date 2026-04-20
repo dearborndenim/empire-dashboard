@@ -150,6 +150,26 @@ describe('loadConfig', () => {
     const ms = cfg.apps.find((a) => a.name === 'McSecretary');
     expect(ms?.railwayLogsUrl).toBe('https://railway.com/project/abc/service/def');
   });
+
+  it('defaults incidentsRetentionDays to 30 and leaves token undefined', () => {
+    const cfg = loadConfig({});
+    expect(cfg.incidentsRetentionDays).toBe(30);
+    expect(cfg.incidentsAdminToken).toBeUndefined();
+  });
+
+  it('respects INCIDENTS_RETENTION_DAYS + INCIDENTS_ADMIN_TOKEN env', () => {
+    const cfg = loadConfig({
+      INCIDENTS_RETENTION_DAYS: '45',
+      INCIDENTS_ADMIN_TOKEN: 'secret',
+    });
+    expect(cfg.incidentsRetentionDays).toBe(45);
+    expect(cfg.incidentsAdminToken).toBe('secret');
+  });
+
+  it('falls back to 30 when INCIDENTS_RETENTION_DAYS is garbage', () => {
+    const cfg = loadConfig({ INCIDENTS_RETENTION_DAYS: 'abc' });
+    expect(cfg.incidentsRetentionDays).toBe(30);
+  });
 });
 
 describe('buildAppList railway logs overrides', () => {

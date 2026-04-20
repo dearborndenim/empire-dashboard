@@ -1,17 +1,19 @@
 /**
  * Minimal email interface for Empire Dashboard.
  *
- * The dashboard doesn't have SMTP wired up yet — rather than pull in
- * nodemailer and force Robert to configure SMTP creds, we define a small
- * `EmailSender` interface and ship two implementations:
+ * Ships two implementations:
  *
  *  - ConsoleEmailSender: logs the message to stdout (default when
- *    EMAIL_DISABLED=1 or no other sender is configured)
- *  - A future SMTP sender can implement the same interface without any
- *    caller changes.
+ *    EMAIL_DISABLED=1 or no other sender is configured).
+ *  - SmtpEmailSender: real SMTP transport backed by `nodemailer`. Selected
+ *    automatically when SMTP_HOST is set.
  *
  * Callers must only depend on `EmailSender`.
  */
+
+// nodemailer has no ESM type export we care about; use the default import.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+import nodemailer from 'nodemailer';
 
 export interface EmailMessage {
   to: string | string[];
@@ -63,21 +65,126 @@ function indent(text: string, prefix: string): string {
     .join('\n');
 }
 
+/**
+ * Minimal shape of the nodemailer transporter we depend on. Keeping it
+ * explicit means tests can inject a fake without pulling nodemailer in.
+ */
+export interface SmtpTransporterLike {
+  sendMail(mail: {
+    from?: string;
+    to: string | string[];
+    subject: string;
+    text: string;
+    html?: string;
+  }): Promise<unknown>;
+}
+
+export interface SmtpConfig {
+  host: string;
+  port: number;
+  user?: string;
+  pass?: string;
+  from?: string;
+  secure?: boolean;
+}
+
+export interface SmtpEmailSenderOptions {
+  config: SmtpConfig;
+  /** Optional pre-built transporter (used by tests). */
+  transporter?: SmtpTransporterLike;
+  /** Optional factory for nodemailer (used by tests to avoid real SMTP). */
+  transporterFactory?: (config: SmtpConfig) => SmtpTransporterLike;
+}
+
+/**
+ * Real SMTP transport. Uses nodemailer under the hood. `SMTP_FROM` is
+ * preferred for the envelope sender; callers can still override per-message.
+ */
+export class SmtpEmailSender implements EmailSender {
+  private readonly transporter: SmtpTransporterLike;
+  private readonly defaultFrom?: string;
+
+  constructor(opts: SmtpEmailSenderOptions) {
+    this.defaultFrom = opts.config.from;
+    if (opts.transporter) {
+      this.transporter = opts.transporter;
+      return;
+    }
+    const factory = opts.transporterFactory ?? defaultTransporterFactory;
+    this.transporter = factory(opts.config);
+  }
+
+  async send(message: EmailMessage): Promise<{ delivered: boolean; transport: string }> {
+    try {
+      await this.transporter.sendMail({
+        from: message.from ?? this.defaultFrom,
+        to: message.to,
+        subject: message.subject,
+        text: message.text,
+        html: message.html,
+      });
+      return { delivered: true, transport: 'smtp' };
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[empire-dashboard] SMTP send failed:', err);
+      return { delivered: false, transport: 'smtp' };
+    }
+  }
+}
+
+function defaultTransporterFactory(config: SmtpConfig): SmtpTransporterLike {
+  const auth = config.user && config.pass ? { user: config.user, pass: config.pass } : undefined;
+  const secure = config.secure ?? config.port === 465;
+  return nodemailer.createTransport({
+    host: config.host,
+    port: config.port,
+    secure,
+    auth,
+  }) as unknown as SmtpTransporterLike;
+}
+
 export interface EmailSenderSelection {
   sender: EmailSender;
   /** Which transport we selected, used for logging on startup. */
-  transport: 'console';
+  transport: 'console' | 'smtp';
   /** True if email is disabled (stdout-only). */
   disabled: boolean;
 }
 
+export interface SelectEmailSenderOptions {
+  /** Allows injection of a transporter factory for tests. */
+  transporterFactory?: (config: SmtpConfig) => SmtpTransporterLike;
+}
+
 /**
- * Pick an email sender based on env vars. Today we only support the stdout
- * stub; SMTP is a TODO. Returns metadata so the index.ts can log which
- * transport is being used.
+ * Pick an email sender based on env vars. SMTP is used when `SMTP_HOST` is
+ * set AND email is not explicitly disabled; otherwise we fall back to the
+ * stdout `ConsoleEmailSender`.
  */
-export function selectEmailSender(env: NodeJS.ProcessEnv = process.env): EmailSenderSelection {
+export function selectEmailSender(
+  env: NodeJS.ProcessEnv = process.env,
+  opts: SelectEmailSenderOptions = {},
+): EmailSenderSelection {
   const disabled = env.EMAIL_DISABLED === '1';
+  const host = (env.SMTP_HOST ?? '').trim();
+  if (!disabled && host) {
+    const port = Number(env.SMTP_PORT ?? 587);
+    const config: SmtpConfig = {
+      host,
+      port: Number.isFinite(port) && port > 0 ? port : 587,
+      user: env.SMTP_USER,
+      pass: env.SMTP_PASS,
+      from: env.SMTP_FROM,
+    };
+    return {
+      sender: new SmtpEmailSender({
+        config,
+        transporterFactory: opts.transporterFactory,
+      }),
+      transport: 'smtp',
+      disabled: false,
+    };
+  }
   return {
     sender: new ConsoleEmailSender(),
     transport: 'console',

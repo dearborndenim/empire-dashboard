@@ -8,6 +8,7 @@ import { renderDashboard } from './render';
 import { HistoryStore, SampleStatus, IncidentRow } from './historyStore';
 import { bucketsToSparkline, formatUptimePercent } from './sparkline';
 import { IncidentTracker } from './incidentTracker';
+import { IntegrationTilesFetcher, IntegrationTile } from './integrationTiles';
 
 export interface AppDeps {
   config: RuntimeConfig;
@@ -15,6 +16,12 @@ export interface AppDeps {
   activityTracker: ActivityTracker;
   historyStore?: HistoryStore;
   incidentTracker?: IncidentTracker;
+  integrationTiles?: IntegrationTilesFetcher;
+  /**
+   * Token required to POST incident notes. When unset the note endpoint
+   * returns 503 to make it obvious that admin actions are disabled.
+   */
+  incidentsAdminToken?: string;
 }
 
 /**
@@ -98,7 +105,12 @@ export async function collectStatuses(deps: AppDeps, opts: { force?: boolean } =
  * store is unavailable. Centralised so both the HTML and JSON paths use the
  * same shape.
  */
-export function serializeIncidents(rows: IncidentRow[]): Array<{
+export interface SerializedIncidentNote {
+  at: string;
+  note: string;
+}
+
+export interface SerializedIncident {
   id: number;
   app: string;
   start: string;
@@ -106,20 +118,30 @@ export function serializeIncidents(rows: IncidentRow[]): Array<{
   durationMin: number | null;
   reason: string | null;
   open: boolean;
-}> {
-  return rows.map((r) => ({
-    id: r.id,
-    app: r.app_name,
-    start: r.incident_start,
-    end: r.incident_end,
-    durationMin: r.duration_min,
-    reason: r.reason,
-    open: r.incident_end === null,
-  }));
+  notes?: SerializedIncidentNote[];
+}
+
+export function serializeIncidents(rows: IncidentRow[]): SerializedIncident[] {
+  return rows.map((r) => {
+    const out: SerializedIncident = {
+      id: r.id,
+      app: r.app_name,
+      start: r.incident_start,
+      end: r.incident_end,
+      durationMin: r.duration_min,
+      reason: r.reason,
+      open: r.incident_end === null,
+    };
+    if (Array.isArray(r.notes)) {
+      out.notes = r.notes.map((n) => ({ at: n.at, note: n.note }));
+    }
+    return out;
+  });
 }
 
 export function createApp(deps: AppDeps): Express {
   const app = express();
+  app.use(express.json({ limit: '64kb' }));
 
   // Static assets (CSS)
   app.use('/', express.static(path.join(__dirname, 'public')));
@@ -159,7 +181,11 @@ export function createApp(deps: AppDeps): Express {
         }
       }
       const appName = typeof req.query.app === 'string' ? req.query.app : undefined;
-      const rows = deps.historyStore.listIncidents({ days, app: appName });
+      const rows = deps.historyStore.listIncidents({
+        days,
+        app: appName,
+        includeNotes: true,
+      });
       const incidents = serializeIncidents(rows);
       res.json({
         generatedAt: new Date().toISOString(),
@@ -174,6 +200,51 @@ export function createApp(deps: AppDeps): Express {
     }
   });
 
+  app.post('/api/incidents/:id/note', (req, res) => {
+    try {
+      if (!deps.historyStore) {
+        res.status(503).json({ error: 'history store unavailable' });
+        return;
+      }
+      if (!deps.incidentsAdminToken) {
+        res.status(503).json({ error: 'incident notes disabled (no admin token configured)' });
+        return;
+      }
+      const headerToken =
+        req.header('x-admin-token') ||
+        (req.header('authorization') ?? '').replace(/^Bearer\s+/i, '');
+      if (headerToken !== deps.incidentsAdminToken) {
+        res.status(401).json({ error: 'unauthorized' });
+        return;
+      }
+      const idRaw = Number(req.params.id);
+      if (!Number.isInteger(idRaw) || idRaw <= 0) {
+        res.status(400).json({ error: 'invalid incident id' });
+        return;
+      }
+      const body = (req.body ?? {}) as { note?: unknown };
+      const note = typeof body.note === 'string' ? body.note.trim() : '';
+      if (!note) {
+        res.status(400).json({ error: 'note body is required' });
+        return;
+      }
+      if (note.length > 2000) {
+        res.status(400).json({ error: 'note exceeds 2000 characters' });
+        return;
+      }
+      const saved = deps.historyStore.addIncidentNote(idRaw, note);
+      if (!saved) {
+        res.status(404).json({ error: 'incident not found' });
+        return;
+      }
+      res.status(201).json({ note: saved });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
   app.get('/', async (_req, res) => {
     try {
       const statuses = await collectStatuses(deps);
@@ -181,16 +252,31 @@ export function createApp(deps: AppDeps): Express {
       if (deps.historyStore) {
         try {
           recentIncidents = serializeIncidents(
-            deps.historyStore.listIncidents({ days: 7, limit: 10 }),
+            deps.historyStore.listIncidents({
+              days: 7,
+              limit: 10,
+              includeNotes: true,
+            }),
           );
         } catch (err) {
           // eslint-disable-next-line no-console
           console.error('[empire-dashboard] incident read failed:', err);
         }
       }
+      let integrationTiles: IntegrationTile[] | undefined;
+      if (deps.integrationTiles) {
+        try {
+          integrationTiles = await deps.integrationTiles.getTiles();
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error('[empire-dashboard] integration tiles fetch failed:', err);
+          integrationTiles = [];
+        }
+      }
       const html = renderDashboard(statuses, {
         generatedAt: new Date().toISOString(),
         recentIncidents,
+        integrationTiles,
       });
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(html);

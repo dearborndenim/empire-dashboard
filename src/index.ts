@@ -7,7 +7,11 @@ import { SqliteHistoryStore } from './historyStore';
 import { IncidentTracker } from './incidentTracker';
 import { selectEmailSender } from './email';
 import { sendWeeklyReport } from './weeklyReport';
-import { startWeeklyJob } from './scheduler';
+import { startWeeklyJob, startDailyJob } from './scheduler';
+import {
+  IntegrationTilesFetcher,
+  loadIntegrationTilesConfig,
+} from './integrationTiles';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -53,7 +57,21 @@ async function main(): Promise<void> {
     `[empire-dashboard] email transport: ${emailSelection.transport}${emailSelection.disabled ? ' (EMAIL_DISABLED=1)' : ''}`,
   );
 
-  const app = createApp({ config, healthChecker, activityTracker, historyStore, incidentTracker });
+  // Integration observability tiles (PO receiver / kanban webhooks).
+  const integrationConfig = loadIntegrationTilesConfig(process.env);
+  const integrationTiles = new IntegrationTilesFetcher({
+    config: integrationConfig,
+  });
+
+  const app = createApp({
+    config,
+    healthChecker,
+    activityTracker,
+    historyStore,
+    incidentTracker,
+    integrationTiles,
+    incidentsAdminToken: config.incidentsAdminToken,
+  });
 
   const server = app.listen(config.port, () => {
     console.log(`[empire-dashboard] listening on :${config.port}`);
@@ -112,10 +130,31 @@ async function main(): Promise<void> {
     });
   }
 
+  // Daily incident-retention prune — 3 AM America/Chicago.
+  let dailyPruneJob: { stop(): void } | undefined;
+  if (historyStore) {
+    dailyPruneJob = startDailyJob({
+      name: 'incident-prune',
+      hourLocal: 3,
+      timezone: 'America/Chicago',
+      run: () => {
+        try {
+          const removed = historyStore!.pruneIncidents(config.incidentsRetentionDays);
+          console.log(
+            `[empire-dashboard] incident prune removed ${removed} closed incidents older than ${config.incidentsRetentionDays}d`,
+          );
+        } catch (err) {
+          console.error('[empire-dashboard] incident prune failed:', err);
+        }
+      },
+    });
+  }
+
   const shutdown = (signal: string): void => {
     console.log(`[empire-dashboard] ${signal} received, shutting down`);
     clearInterval(timer);
     if (weeklyJob) weeklyJob.stop();
+    if (dailyPruneJob) dailyPruneJob.stop();
     if (historyStore) {
       try { historyStore.close(); } catch { /* ignore */ }
     }

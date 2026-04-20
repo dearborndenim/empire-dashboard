@@ -19,6 +19,7 @@ function buildDeps(downBeta = true): {
     pollIntervalMs: 300000,
     historyDbPath: ':memory:',
     historyRetentionDays: 7,
+    incidentsRetentionDays: 30,
     apps: [
       { name: 'Alpha', repo: 'o/alpha', url: 'https://alpha' },
       { name: 'Beta', repo: 'o/beta', url: 'https://beta' },
@@ -126,10 +127,14 @@ describe('GET /api/incidents', () => {
       uptimePercent: jest.fn(() => null),
       bucketLastNHours: jest.fn(() => []),
       pruneOlderThan: jest.fn(() => 0),
+      pruneIncidents: jest.fn(() => 0),
       openIncident: jest.fn(() => 1),
       closeIncident: jest.fn(() => null),
       getOpenIncident: jest.fn(() => null),
       listIncidents: jest.fn(() => { throw new Error('boom'); }),
+      getIncidentById: jest.fn(() => null),
+      addIncidentNote: jest.fn(() => null),
+      getIncidentNotes: jest.fn(() => []),
       close: jest.fn(),
     };
     const app = createApp({ ...deps, historyStore: broken });
@@ -206,10 +211,14 @@ describe('GET / with recent incidents', () => {
       uptimePercent: jest.fn(() => null),
       bucketLastNHours: jest.fn(() => []),
       pruneOlderThan: jest.fn(() => 0),
+      pruneIncidents: jest.fn(() => 0),
       openIncident: jest.fn(() => 1),
       closeIncident: jest.fn(() => null),
       getOpenIncident: jest.fn(() => null),
       listIncidents: jest.fn(() => { throw new Error('read boom'); }),
+      getIncidentById: jest.fn(() => null),
+      addIncidentNote: jest.fn(() => null),
+      getIncidentNotes: jest.fn(() => []),
       close: jest.fn(),
     };
     const app = createApp({ ...deps, historyStore: broken });

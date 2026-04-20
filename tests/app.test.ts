@@ -16,6 +16,7 @@ function buildDeps(
     pollIntervalMs: 300000,
     historyDbPath: ':memory:',
     historyRetentionDays: 7,
+    incidentsRetentionDays: 30,
     apps: [
       { name: 'Alpha', repo: 'o/alpha', url: 'https://alpha', railwayLogsUrl: 'https://rail/alpha' },
       { name: 'Beta', repo: 'o/beta', url: 'https://beta' },
@@ -168,10 +169,14 @@ describe('collectStatuses with history', () => {
       uptimePercent: jest.fn(() => null),
       bucketLastNHours: jest.fn(() => []),
       pruneOlderThan: jest.fn(() => 0),
+      pruneIncidents: jest.fn(() => 0),
       openIncident: jest.fn(() => 1),
       closeIncident: jest.fn(() => null),
       getOpenIncident: jest.fn(() => null),
       listIncidents: jest.fn(() => []),
+      getIncidentById: jest.fn(() => null),
+      addIncidentNote: jest.fn(() => null),
+      getIncidentNotes: jest.fn(() => []),
       close: jest.fn(),
     };
     const enriched = { ...deps, historyStore: throwingStore };

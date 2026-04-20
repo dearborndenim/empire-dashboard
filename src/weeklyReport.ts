@@ -17,6 +17,20 @@ export interface WeeklyReportData {
   openCount: number;
   uptimeRollup: Array<{ app: string; uptimePercent: number | null }>;
   topDowntime: Array<{ app: string; totalDowntimeMin: number; incidents: number }>;
+  /**
+   * Top-3 longest single downtimes in the window (open->close duration).
+   * Unresolved (still-open) incidents are truncated at `nowMs`. Sorted by
+   * duration descending.
+   */
+  longestIncidents: Array<{
+    app: string;
+    durationMin: number;
+    startedAt: string;
+    endedAt: string | null;
+    open: boolean;
+    reason: string | null;
+    notes: Array<{ at: string; note: string }>;
+  }>;
 }
 
 export interface BuildReportOptions {
@@ -35,7 +49,12 @@ export function buildWeeklyReportData(opts: BuildReportOptions): WeeklyReportDat
   const nowMs = opts.nowMs ?? Date.now();
   const generatedAt = new Date(nowMs).toISOString();
 
-  const incidents = opts.store.listIncidents({ days: windowDays, nowMs, limit: 10000 });
+  const incidents = opts.store.listIncidents({
+    days: windowDays,
+    nowMs,
+    limit: 10000,
+    includeNotes: true,
+  });
   const closedCount = incidents.filter((i) => i.incident_end !== null).length;
   const openCount = incidents.length - closedCount;
 
@@ -65,6 +84,32 @@ export function buildWeeklyReportData(opts: BuildReportOptions): WeeklyReportDat
     .sort((a, b) => b.totalDowntimeMin - a.totalDowntimeMin)
     .slice(0, 3);
 
+  // Longest single downtimes (not per-app totals). Unresolved incidents
+  // have duration = now - start (truncated at cutoff).
+  const longestIncidents = incidents
+    .map((inc) => {
+      const startMs = Date.parse(inc.incident_start);
+      let durationMin: number | null = null;
+      const open = inc.incident_end === null;
+      if (typeof inc.duration_min === 'number') {
+        durationMin = inc.duration_min;
+      } else if (open && Number.isFinite(startMs)) {
+        durationMin = Math.max(0, (nowMs - startMs) / 60000);
+      }
+      return {
+        app: inc.app_name,
+        durationMin: durationMin ?? 0,
+        startedAt: inc.incident_start,
+        endedAt: inc.incident_end,
+        open,
+        reason: inc.reason ?? null,
+        notes: (inc.notes ?? []).map((n) => ({ at: n.at, note: n.note })),
+      };
+    })
+    .filter((r) => r.durationMin > 0)
+    .sort((a, b) => b.durationMin - a.durationMin)
+    .slice(0, 3);
+
   return {
     windowDays,
     generatedAt,
@@ -73,6 +118,7 @@ export function buildWeeklyReportData(opts: BuildReportOptions): WeeklyReportDat
     openCount,
     uptimeRollup,
     topDowntime,
+    longestIncidents,
   };
 }
 
@@ -108,6 +154,30 @@ export function renderWeeklyReportText(data: WeeklyReportData): string {
       lines.push(
         `  ${row.app.padEnd(36)} ${formatMinutes(row.totalDowntimeMin)} across ${row.incidents} incident${row.incidents === 1 ? '' : 's'}`,
       );
+    }
+  }
+  lines.push('');
+  lines.push('Longest downtimes');
+  lines.push('-----------------');
+  if (data.longestIncidents.length === 0) {
+    lines.push('  (none — nothing went red this week)');
+  } else {
+    for (const inc of data.longestIncidents) {
+      const endLabel = inc.open
+        ? 'ongoing (truncated at report time)'
+        : inc.endedAt ?? '—';
+      const reasonLabel = inc.reason ? ` — ${inc.reason}` : '';
+      lines.push(
+        `  ${inc.app}${reasonLabel}`,
+      );
+      lines.push(
+        `    duration: ${formatMinutes(inc.durationMin)}  started: ${inc.startedAt}  ended: ${endLabel}`,
+      );
+      if (inc.notes.length > 0) {
+        for (const n of inc.notes) {
+          lines.push(`    note @ ${n.at}: ${n.note}`);
+        }
+      }
     }
   }
   lines.push('');

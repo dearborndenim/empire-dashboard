@@ -115,3 +115,109 @@ describe('SqliteHistoryStore incidents', () => {
     s.close();
   });
 });
+
+describe('SqliteHistoryStore.pruneIncidents', () => {
+  it('removes closed incidents older than the retention window', () => {
+    const now = Date.parse('2026-04-18T00:00:00.000Z');
+    const s = store(() => now);
+    // Closed 40 days ago — should be pruned.
+    s.openIncident('A', new Date(now - 40 * 86400_000).toISOString(), 'old');
+    s.closeIncident('A', new Date(now - 40 * 86400_000 + 60_000).toISOString());
+    // Closed 5 days ago — should be kept.
+    s.openIncident('B', new Date(now - 5 * 86400_000).toISOString(), 'recent');
+    s.closeIncident('B', new Date(now - 5 * 86400_000 + 60_000).toISOString());
+    const removed = s.pruneIncidents(30, now);
+    expect(removed).toBe(1);
+    const list = s.listIncidents({ days: 90, nowMs: now });
+    expect(list.map((r) => r.app_name)).toEqual(['B']);
+    s.close();
+  });
+
+  it('keeps still-open incidents regardless of age', () => {
+    const now = Date.parse('2026-04-18T00:00:00.000Z');
+    const s = store(() => now);
+    // Open incident started 90 days ago — must NOT be pruned.
+    s.openIncident('A', new Date(now - 90 * 86400_000).toISOString(), 'long outage');
+    const removed = s.pruneIncidents(30, now);
+    expect(removed).toBe(0);
+    expect(s.getOpenIncident('A')).not.toBeNull();
+    s.close();
+  });
+
+  it('cascade-deletes notes when incident is pruned', () => {
+    const now = Date.parse('2026-04-18T00:00:00.000Z');
+    const s = store(() => now);
+    const id = s.openIncident('A', new Date(now - 60 * 86400_000).toISOString(), 'ancient');
+    s.closeIncident('A', new Date(now - 60 * 86400_000 + 120_000).toISOString());
+    s.addIncidentNote(id, 'post-mortem', new Date(now - 59 * 86400_000).toISOString());
+    expect(s.getIncidentNotes(id)).toHaveLength(1);
+    s.pruneIncidents(30, now);
+    expect(s.getIncidentNotes(id)).toHaveLength(0);
+    expect(s.getIncidentById(id)).toBeNull();
+    s.close();
+  });
+
+  it('returns 0 when there is nothing to prune', () => {
+    const now = Date.parse('2026-04-18T00:00:00.000Z');
+    const s = store(() => now);
+    expect(s.pruneIncidents(30, now)).toBe(0);
+    s.close();
+  });
+});
+
+describe('SqliteHistoryStore incident notes', () => {
+  it('addIncidentNote appends a note row and returns it', () => {
+    const s = store();
+    const id = s.openIncident('A', '2026-04-18T00:00:00.000Z', 'HTTP 502');
+    const note = s.addIncidentNote(id, 'rebooted service', '2026-04-18T00:05:00.000Z');
+    expect(note).not.toBeNull();
+    expect(note!.incident_id).toBe(id);
+    expect(note!.note).toBe('rebooted service');
+    expect(note!.at).toBe('2026-04-18T00:05:00.000Z');
+    const notes = s.getIncidentNotes(id);
+    expect(notes).toHaveLength(1);
+    expect(notes[0].note).toBe('rebooted service');
+    s.close();
+  });
+
+  it('addIncidentNote returns null when incident id is unknown', () => {
+    const s = store();
+    const note = s.addIncidentNote(9999, 'no such incident');
+    expect(note).toBeNull();
+    s.close();
+  });
+
+  it('listIncidents includes notes when includeNotes=true', () => {
+    const now = Date.parse('2026-04-18T00:00:00.000Z');
+    const s = store(() => now);
+    const id = s.openIncident('A', new Date(now - 60_000).toISOString(), 'HTTP 500');
+    s.addIncidentNote(id, 'first', new Date(now - 30_000).toISOString());
+    s.addIncidentNote(id, 'second', new Date(now - 10_000).toISOString());
+    const rows = s.listIncidents({ days: 7, nowMs: now, includeNotes: true });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].notes).toBeDefined();
+    expect(rows[0].notes).toHaveLength(2);
+    expect(rows[0].notes![0].note).toBe('first');
+    expect(rows[0].notes![1].note).toBe('second');
+    s.close();
+  });
+
+  it('listIncidents omits notes when includeNotes is not set', () => {
+    const s = store();
+    const id = s.openIncident('A', new Date().toISOString(), 'r');
+    s.addIncidentNote(id, 'x');
+    const rows = s.listIncidents();
+    expect(rows[0].notes).toBeUndefined();
+    s.close();
+  });
+
+  it('getIncidentById returns the row or null', () => {
+    const s = store();
+    const id = s.openIncident('A', new Date().toISOString(), 'r');
+    const row = s.getIncidentById(id);
+    expect(row).not.toBeNull();
+    expect(row!.app_name).toBe('A');
+    expect(s.getIncidentById(9999)).toBeNull();
+    s.close();
+  });
+});

@@ -1,4 +1,10 @@
-import { msUntilNextWeeklyRun, partsInZone, startWeeklyJob } from '../src/scheduler';
+import {
+  msUntilNextWeeklyRun,
+  partsInZone,
+  startWeeklyJob,
+  msUntilNextDailyRun,
+  startDailyJob,
+} from '../src/scheduler';
 
 describe('partsInZone', () => {
   it('returns correct parts for a known UTC moment in America/Chicago', () => {
@@ -153,5 +159,121 @@ describe('startWeeklyJob', () => {
     timers[0].fn();
     await new Promise((resolve) => setImmediate(resolve));
     expect(timers.length).toBe(countBefore);
+  });
+});
+
+describe('msUntilNextDailyRun', () => {
+  it('computes delay to the next 3 AM America/Chicago from midnight Chicago', () => {
+    // 2026-04-19T05:00:00Z = midnight CDT.
+    const now = Date.parse('2026-04-19T05:00:00.000Z');
+    const delay = msUntilNextDailyRun({
+      hourLocal: 3,
+      timezone: 'America/Chicago',
+      now: () => now,
+    });
+    expect(delay).toBe(3 * 3600_000);
+  });
+
+  it('returns a positive delay when now equals the target moment', () => {
+    const now = Date.parse('2026-04-19T08:00:00.000Z'); // 3am CDT exactly
+    const delay = msUntilNextDailyRun({
+      hourLocal: 3,
+      timezone: 'America/Chicago',
+      now: () => now,
+    });
+    expect(delay).toBeGreaterThan(0);
+    expect(delay).toBeLessThanOrEqual(24 * 3600_000);
+  });
+});
+
+describe('startDailyJob', () => {
+  it('schedules via the injected setTimer and stops cleanly', () => {
+    const timers: Array<{ fn: () => void; ms: number }> = [];
+    const clears: unknown[] = [];
+    const handle = startDailyJob({
+      name: 'test-daily',
+      hourLocal: 3,
+      timezone: 'UTC',
+      now: () => Date.parse('2026-04-19T00:00:00.000Z'), // midnight UTC
+      run: () => { /* noop */ },
+      setTimer: (fn, ms) => {
+        const t = { fn, ms };
+        timers.push(t);
+        return t;
+      },
+      clearTimer: (t) => clears.push(t),
+    });
+    expect(timers.length).toBe(1);
+    expect(timers[0].ms).toBe(3 * 3600_000);
+    handle.stop();
+    expect(clears.length).toBe(1);
+  });
+
+  it('invokes run on fire and reschedules', async () => {
+    const timers: Array<{ fn: () => void; ms: number }> = [];
+    let calls = 0;
+    startDailyJob({
+      name: 'test-daily',
+      hourLocal: 3,
+      timezone: 'UTC',
+      now: () => Date.parse('2026-04-19T00:00:00.000Z'),
+      run: () => { calls += 1; },
+      setTimer: (fn, ms) => {
+        const t = { fn, ms };
+        timers.push(t);
+        return t;
+      },
+      clearTimer: () => { /* noop */ },
+    });
+    timers[0].fn();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(calls).toBe(1);
+    expect(timers.length).toBe(2);
+  });
+
+  it('calls onError on thrown run and reschedules', async () => {
+    const timers: Array<{ fn: () => void; ms: number }> = [];
+    const errors: unknown[] = [];
+    startDailyJob({
+      name: 'test-daily',
+      hourLocal: 3,
+      timezone: 'UTC',
+      now: () => Date.parse('2026-04-19T00:00:00.000Z'),
+      run: async () => { throw new Error('bad'); },
+      onError: (e) => errors.push(e),
+      setTimer: (fn, ms) => {
+        const t = { fn, ms };
+        timers.push(t);
+        return t;
+      },
+      clearTimer: () => { /* noop */ },
+    });
+    timers[0].fn();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(errors.length).toBe(1);
+    expect(timers.length).toBe(2);
+  });
+
+  it('stop() prevents further reschedules', async () => {
+    const timers: Array<{ fn: () => void; ms: number }> = [];
+    const handle = startDailyJob({
+      name: 'test-daily',
+      hourLocal: 3,
+      timezone: 'UTC',
+      now: () => Date.parse('2026-04-19T00:00:00.000Z'),
+      run: () => { /* noop */ },
+      setTimer: (fn, ms) => {
+        const t = { fn, ms };
+        timers.push(t);
+        return t;
+      },
+      clearTimer: () => { /* noop */ },
+    });
+    handle.stop();
+    const before = timers.length;
+    timers[0].fn();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(timers.length).toBe(before);
   });
 });

@@ -91,6 +91,91 @@ describe('buildWeeklyReportData', () => {
     store.close();
   });
 
+  it('computes longestIncidents truncating open ones at nowMs and sorted desc', () => {
+    const now = Date.parse('2026-04-18T00:00:00.000Z');
+    const s = new SqliteHistoryStore({ filePath: ':memory:', now: () => now });
+    // Closed: 20 min
+    s.openIncident('Alpha', new Date(now - 30 * 60_000).toISOString(), 'HTTP 502');
+    s.closeIncident('Alpha', new Date(now - 10 * 60_000).toISOString());
+    // Closed: 45 min
+    s.openIncident('Beta', new Date(now - 90 * 60_000).toISOString(), 'HTTP 500');
+    s.closeIncident('Beta', new Date(now - 45 * 60_000).toISOString());
+    // Still-open: ~60 min truncated
+    s.openIncident('Gamma', new Date(now - 60 * 60_000).toISOString(), 'conn refused');
+    // Another closed 5 min, should be excluded from top-3 only if longer ones exist
+    s.openIncident('Delta', new Date(now - 10 * 60_000).toISOString(), 'HTTP 504');
+    s.closeIncident('Delta', new Date(now - 5 * 60_000).toISOString());
+    const data = buildWeeklyReportData({
+      apps: [
+        { name: 'Alpha', repo: 'o/a' },
+        { name: 'Beta', repo: 'o/b' },
+        { name: 'Gamma', repo: 'o/g' },
+        { name: 'Delta', repo: 'o/d' },
+      ],
+      store: s,
+      nowMs: now,
+    });
+    expect(data.longestIncidents).toHaveLength(3);
+    expect(data.longestIncidents[0].app).toBe('Gamma');
+    expect(data.longestIncidents[0].open).toBe(true);
+    expect(data.longestIncidents[0].durationMin).toBeGreaterThan(59);
+    expect(data.longestIncidents[1].app).toBe('Beta');
+    expect(data.longestIncidents[1].open).toBe(false);
+    expect(data.longestIncidents[1].durationMin).toBe(45);
+    expect(data.longestIncidents[2].app).toBe('Alpha');
+    s.close();
+  });
+
+  it('includes notes on longestIncidents', () => {
+    const now = Date.parse('2026-04-18T00:00:00.000Z');
+    const s = new SqliteHistoryStore({ filePath: ':memory:', now: () => now });
+    const id = s.openIncident('Beta', new Date(now - 30 * 60_000).toISOString(), 'HTTP 500');
+    s.closeIncident('Beta', new Date(now - 10 * 60_000).toISOString());
+    s.addIncidentNote(id, 'rolled back deploy', new Date(now - 20 * 60_000).toISOString());
+    const data = buildWeeklyReportData({
+      apps: [{ name: 'Beta', repo: 'o/b' }],
+      store: s,
+      nowMs: now,
+    });
+    expect(data.longestIncidents).toHaveLength(1);
+    expect(data.longestIncidents[0].notes).toHaveLength(1);
+    expect(data.longestIncidents[0].notes[0].note).toBe('rolled back deploy');
+    const text = renderWeeklyReportText(data);
+    expect(text).toContain('Longest downtimes');
+    expect(text).toContain('Beta');
+    expect(text).toContain('HTTP 500');
+    expect(text).toContain('rolled back deploy');
+    s.close();
+  });
+
+  it('renders "(none ...)" under Longest downtimes when there are no incidents', () => {
+    const now = Date.parse('2026-04-18T00:00:00.000Z');
+    const s = new SqliteHistoryStore({ filePath: ':memory:', now: () => now });
+    const data = buildWeeklyReportData({
+      apps: [{ name: 'Alpha', repo: 'o/a' }],
+      store: s,
+      nowMs: now,
+    });
+    const text = renderWeeklyReportText(data);
+    expect(text).toContain('Longest downtimes');
+    expect(text.match(/\(none — nothing went red this week\)/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+    s.close();
+  });
+
+  it('marks unresolved incidents as ongoing in the rendered body', () => {
+    const now = Date.parse('2026-04-18T00:00:00.000Z');
+    const s = new SqliteHistoryStore({ filePath: ':memory:', now: () => now });
+    s.openIncident('Gamma', new Date(now - 30 * 60_000).toISOString(), 'HTTP 500');
+    const data = buildWeeklyReportData({
+      apps: [{ name: 'Gamma', repo: 'o/g' }],
+      store: s,
+      nowMs: now,
+    });
+    const text = renderWeeklyReportText(data);
+    expect(text).toContain('ongoing (truncated at report time)');
+    s.close();
+  });
+
   it('caps topDowntime at 3', () => {
     const now = Date.parse('2026-04-18T00:00:00.000Z');
     const store = new SqliteHistoryStore({ filePath: ':memory:', now: () => now });

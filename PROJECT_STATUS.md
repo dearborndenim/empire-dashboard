@@ -7,7 +7,29 @@ touched. Yellow = up but idle. Red = down. Minimal, clean, fast — a v1
 monitor that we can layer features onto (alerting, incident history,
 per-user views) as the empire grows.
 
-## Current state — 74% (2026-04-18)
+## Current state — 78% (2026-04-19)
+- Per-app incident log in SQLite (`incidents` table: start/end/duration/reason)
+- `incident_notes` table + `POST /api/incidents/:id/note` admin-token gated
+  endpoint (x-admin-token header or Bearer token); notes surfaced on API + UI
+- Daily 3 AM America/Chicago incident prune (INCIDENTS_RETENTION_DAYS, default
+  30); still-open incidents always retained; cascade-deletes incident notes
+- `SmtpEmailSender` (nodemailer) + factory auto-selects SMTP when SMTP_HOST
+  is set, else falls back to existing ConsoleEmailSender
+- Weekly summary email now includes "Longest downtimes" section with top-3
+  single-incident durations (open->close; unresolved truncated at cutoff),
+  per-incident app/duration/start/end/reason/notes
+- Integration observability tiles on the HTML dashboard:
+  * PO Receiver Webhooks (success rate + dead-lettered count)
+  * Kanban Inbound Webhooks (total_received + unmatched_count)
+  * 60s in-memory cache, graceful "Not configured" + error fallbacks
+- `IncidentTracker` detects green->red / red->green transitions on each poll
+- `GET /api/incidents?days=N&app=NAME` JSON endpoint, now returns notes
+- "Recent Incidents" panel on the HTML dashboard (last 10 rows + notes)
+- In-process `startWeeklyJob` + `startDailyJob` scheduler (no node-cron dep),
+  DST-aware via Intl.DateTimeFormat
+- 230 tests passing, 96.18% statement / 87.36% branch / 97.07% line coverage
+
+## Prior state — 74% (2026-04-18)
 - Per-app incident log in SQLite (`incidents` table: start/end/duration/reason)
 - `IncidentTracker` detects green->red / red->green transitions on each poll
 - `GET /api/incidents?days=N&app=NAME` JSON endpoint (back-compat, additive)
@@ -38,18 +60,31 @@ dearborn-ai-agents, DDA-CS-Manager, diamond-pickaxe-returns-processor.
 
 ## Iteration backlog
 - Wire up real Railway URLs via `APPS_URL_OVERRIDES` env var (and `APPS_RAILWAY_LOGS_OVERRIDES` for the logs links)
-- Real SMTP transport behind `EmailSender` (currently stubbed to stdout)
+- Configure real SMTP creds on Railway (SMTP_HOST/PORT/USER/PASS/FROM)
+- Wire PO_RECEIVER_URL + KANBAN_URL + api keys on Railway so tiles light up
 - Alert to Telegram/Slack on each incident transition (reuse `IncidentTracker`)
-- Per-app drilldown page with recent commits + incident history
+- Per-app drilldown page with recent commits + incident history + notes editor
 - Auto-refresh the HTML page every 60s (or use SSE/polling on client)
 - Latency sparkline (response_ms) alongside the uptime sparkline
 - `last deploy` column from Railway API when available
-- Retention prune for `incidents` table (currently unbounded)
 
 ## Robert's Feedback
 _(none yet — newly built)_
 
 ## Build history
+### 2026-04-19 — polish v3 (retention, SMTP, notes, integration tiles)
+- Feature branch `feature/incident-polish-v3`
+- `historyStore.ts`: `pruneIncidents(retentionDays)` (closed-only, cascade-deletes notes); `incident_notes` table + `addIncidentNote` / `getIncidentNotes` / `getIncidentById`; `listIncidents({ includeNotes })`
+- `email.ts`: `SmtpEmailSender` (nodemailer-backed) + `selectEmailSender` picks SMTP when `SMTP_HOST` set
+- `weeklyReport.ts`: `longestIncidents` (top-3 single durations, open truncated at cutoff, with notes) + "Longest downtimes" text section
+- `scheduler.ts`: `startDailyJob` + `msUntilNextDailyRun` reusing `partsInZone` (DST-aware, no node-cron dep)
+- `app.ts`: `POST /api/incidents/:id/note` with token gate (x-admin-token header OR `Authorization: Bearer`); returns 503 when store/token absent, 401 wrong token, 400 invalid body, 404 unknown id, 201 on success; notes surfaced in GET `/api/incidents` + HTML panel
+- `integrationTiles.ts`: new `IntegrationTilesFetcher` (60s cache, graceful "Not configured", error tiles on HTTP/non-OK/thrown); PO receiver + Kanban inbound endpoints
+- `render.ts`: "Integrations" section renders tiles; incidents panel renders inline notes; CSS added for tiles + notes
+- `config.ts`: `INCIDENTS_RETENTION_DAYS` (default 30) + `INCIDENTS_ADMIN_TOKEN` env plumbed through `RuntimeConfig`
+- `index.ts`: daily prune job wired to 3 AM America/Chicago; SMTP transport auto-selected; integration tiles fetcher wired; `incidentsAdminToken` passed to app
+- Tests: +55 (175 → 230). Coverage 96.18% stmt / 87.36% branch / 97.07% line. New: pruneIncidents (4), incident notes (5), SMTP sender + selector (8), longest downtime narrative (4), integration tiles (11), note endpoint (9), daily scheduler (4), render integration tiles + notes (4), config env (3).
+
 ### 2026-04-18 — polish v2 (incidents + weekly summary)
 - Feature branch `feature/polish-v2-incidents`, merged to `main`
 - `historyStore.ts`: new `incidents` table + `openIncident`/`closeIncident`/`getOpenIncident`/`listIncidents`

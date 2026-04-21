@@ -4,7 +4,7 @@ import { RuntimeConfig } from './config';
 import { HealthChecker } from './healthChecker';
 import { ActivityTracker } from './activityTracker';
 import { combineStatus, AppStatus } from './status';
-import { renderDashboard } from './render';
+import { renderDashboard, renderIncidentsPage, RenderPruneRun } from './render';
 import { HistoryStore, SampleStatus, IncidentRow } from './historyStore';
 import { bucketsToSparkline, formatUptimePercent } from './sparkline';
 import { IncidentTracker } from './incidentTracker';
@@ -166,6 +166,41 @@ export function createApp(deps: AppDeps): Express {
     }
   });
 
+  app.get('/api/incidents/stats', (req, res) => {
+    try {
+      if (!deps.historyStore) {
+        res.status(503).json({ error: 'history store unavailable' });
+        return;
+      }
+      const appName = typeof req.query.app === 'string' ? req.query.app.trim() : '';
+      if (!appName) {
+        res.status(400).json({ error: 'query param "app" is required' });
+        return;
+      }
+      const daysRaw = req.query.days;
+      let days = 7;
+      if (typeof daysRaw === 'string') {
+        const parsed = Number(daysRaw);
+        if (Number.isFinite(parsed)) {
+          days = Math.max(1, Math.min(90, parsed));
+        }
+      }
+      const stats = deps.historyStore.computeIncidentStats({ app: appName, days });
+      res.json({
+        app: appName,
+        windowDays: days,
+        mtbfHours: stats.mtbfHours,
+        mttrMinutes: stats.mttrMinutes,
+        incidentCount: stats.incidentCount,
+        totalDowntimeMinutes: stats.totalDowntimeMin,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
   app.get('/api/incidents', (req, res) => {
     try {
       if (!deps.historyStore) {
@@ -245,6 +280,46 @@ export function createApp(deps: AppDeps): Express {
     }
   });
 
+  app.get('/incidents', (_req, res) => {
+    try {
+      const appStats: Array<{
+        app: string;
+        mtbfHours: number | null;
+        mttrMinutes: number | null;
+        incidentCount: number;
+        totalDowntimeMin: number;
+      }> = [];
+      let recent: ReturnType<typeof serializeIncidents> = [];
+      if (deps.historyStore) {
+        for (const a of deps.config.apps) {
+          const s = deps.historyStore.computeIncidentStats({ app: a.name, days: 7 });
+          appStats.push({
+            app: a.name,
+            mtbfHours: s.mtbfHours,
+            mttrMinutes: s.mttrMinutes,
+            incidentCount: s.incidentCount,
+            totalDowntimeMin: s.totalDowntimeMin,
+          });
+        }
+        recent = serializeIncidents(
+          deps.historyStore.listIncidents({ days: 7, limit: 50, includeNotes: true }),
+        );
+      }
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(
+        renderIncidentsPage({
+          generatedAt: new Date().toISOString(),
+          appStats,
+          recentIncidents: recent,
+        }),
+      );
+    } catch (err) {
+      res.status(500).send(
+        `<h1>Incidents page error</h1><pre>${err instanceof Error ? err.message : String(err)}</pre>`,
+      );
+    }
+  });
+
   app.get('/', async (_req, res) => {
     try {
       const statuses = await collectStatuses(deps);
@@ -273,10 +348,32 @@ export function createApp(deps: AppDeps): Express {
           integrationTiles = [];
         }
       }
+      let latestPruneRun: RenderPruneRun | null | undefined;
+      if (deps.historyStore) {
+        try {
+          const last = deps.historyStore.getLatestPruneRun();
+          if (last) {
+            const ms = Date.parse(last.ran_at);
+            const ageHours = Number.isFinite(ms)
+              ? (Date.now() - ms) / 3600_000
+              : null;
+            latestPruneRun = {
+              ranAt: last.ran_at,
+              deletedCount: last.deleted_count,
+              deletedNotesCount: last.deleted_notes_count,
+              ageHours,
+            };
+          }
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error('[empire-dashboard] prune-run read failed:', err);
+        }
+      }
       const html = renderDashboard(statuses, {
         generatedAt: new Date().toISOString(),
         recentIncidents,
         integrationTiles,
+        latestPruneRun,
       });
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(html);

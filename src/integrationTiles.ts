@@ -28,6 +28,8 @@ export interface IntegrationTile {
   details?: Array<{ label: string; value: string }>;
   /** If the tile is "error" we may have a short reason for Railway logs. */
   error?: string;
+  /** Historical daily success-rate points (ascending date) used for a sparkline. */
+  sparkline?: IntegrationSparklinePoint[];
 }
 
 export interface IntegrationFetchImpl {
@@ -43,6 +45,22 @@ export interface IntegrationTilesConfig {
   poReceiverApiKey?: string;
   kanbanUrl?: string;
   kanbanApiKey?: string;
+  contentEngineUrl?: string;
+  contentEngineApiKey?: string;
+}
+
+/**
+ * Per-integration daily sparkline data pulled from
+ * `integration_stats_history`. Rendered inline in each tile when available.
+ */
+export interface IntegrationSparklinePoint {
+  date: string;
+  successRate: number;
+  totalAttempts: number;
+}
+
+export interface IntegrationSparklineResolver {
+  (integrationName: string): IntegrationSparklinePoint[];
 }
 
 export interface IntegrationTilesOptions {
@@ -50,6 +68,8 @@ export interface IntegrationTilesOptions {
   fetchImpl?: IntegrationFetchImpl;
   now?: () => number;
   cacheTtlMs?: number;
+  /** Optional resolver that returns daily-snapshot sparkline data per tile. */
+  sparklineResolver?: IntegrationSparklineResolver;
 }
 
 interface CacheEntry {
@@ -66,6 +86,7 @@ export class IntegrationTilesFetcher {
   private readonly fetchImpl: IntegrationFetchImpl;
   private readonly now: () => number;
   private readonly cacheTtlMs: number;
+  private readonly sparklineResolver?: IntegrationSparklineResolver;
   private cache: CacheEntry | null = null;
 
   constructor(opts: IntegrationTilesOptions) {
@@ -73,6 +94,7 @@ export class IntegrationTilesFetcher {
     this.fetchImpl = opts.fetchImpl ?? defaultFetchImpl;
     this.now = opts.now ?? (() => Date.now());
     this.cacheTtlMs = opts.cacheTtlMs ?? 60_000;
+    this.sparklineResolver = opts.sparklineResolver;
   }
 
   /**
@@ -86,12 +108,56 @@ export class IntegrationTilesFetcher {
     const tiles = await Promise.all([
       fetchPoReceiverTile(this.config, this.fetchImpl),
       fetchKanbanTile(this.config, this.fetchImpl),
+      fetchContentEngineTile(this.config, this.fetchImpl),
     ]);
+    if (this.sparklineResolver) {
+      for (const tile of tiles) {
+        if (tile.state === 'not-configured') continue;
+        try {
+          const spark = this.sparklineResolver(tile.id);
+          if (spark && spark.length > 0) tile.sparkline = spark;
+        } catch {
+          // Never let sparkline errors bubble.
+        }
+      }
+    }
     this.cache = {
       tiles,
       expiresAt: this.now() + this.cacheTtlMs,
     };
     return tiles;
+  }
+
+  /**
+   * Fetch the raw success_rate + total_attempts for each configured
+   * integration. Used by the daily snapshot cron. Returns one entry per
+   * configured integration; integrations with no env wiring return null so
+   * the caller can skip them.
+   */
+  async fetchRawStats(): Promise<
+    Array<{
+      integration: string;
+      successRate: number | null;
+      totalAttempts: number | null;
+      error?: string;
+    }>
+  > {
+    const results: Array<{
+      integration: string;
+      successRate: number | null;
+      totalAttempts: number | null;
+      error?: string;
+    }> = [];
+    if (this.config.poReceiverUrl && this.config.poReceiverApiKey) {
+      results.push(await fetchRawFor('po-receiver', this.config, this.fetchImpl));
+    }
+    if (this.config.kanbanUrl && this.config.kanbanApiKey) {
+      results.push(await fetchRawFor('kanban', this.config, this.fetchImpl));
+    }
+    if (this.config.contentEngineUrl && this.config.contentEngineApiKey) {
+      results.push(await fetchRawFor('content-engine', this.config, this.fetchImpl));
+    }
+    return results;
   }
 }
 
@@ -197,6 +263,141 @@ async function fetchKanbanTile(
   }
 }
 
+async function fetchContentEngineTile(
+  config: IntegrationTilesConfig,
+  fetchImpl: IntegrationFetchImpl,
+): Promise<IntegrationTile> {
+  if (!config.contentEngineUrl || !config.contentEngineApiKey) {
+    return notConfigured('content-engine', 'Content Engine Quality');
+  }
+  const url = `${stripTrailing(config.contentEngineUrl)}/api/integration/prompt-quality-stats`;
+  try {
+    const res = await fetchImpl(url, {
+      headers: { 'x-api-key': config.contentEngineApiKey },
+    });
+    if (!res.ok) {
+      return errorTile('content-engine', 'Content Engine Quality', `HTTP ${res.status}`);
+    }
+    const body = (await res.json()) as Record<string, unknown>;
+    const rejectedRate = pickNumber(body, ['rejected_rate', 'rejectedRate']);
+    const rejectedCount = pickNumber(body, ['rejected_count', 'rejectedCount']);
+    const avgQuality = pickNumber(body, ['avg_quality_score', 'avgQualityScore']);
+    const distributionRaw = body.scene_distribution ?? body.sceneDistribution;
+    const topScenes: Array<{ scene: string; count: number }> = [];
+    if (distributionRaw && typeof distributionRaw === 'object' && !Array.isArray(distributionRaw)) {
+      const entries = Object.entries(distributionRaw as Record<string, unknown>);
+      for (const [scene, raw] of entries) {
+        const count =
+          typeof raw === 'number' && Number.isFinite(raw)
+            ? raw
+            : typeof raw === 'string' && Number.isFinite(Number(raw))
+              ? Number(raw)
+              : null;
+        if (count !== null) topScenes.push({ scene, count });
+      }
+      topScenes.sort((a, b) => b.count - a.count);
+    }
+    const top3 = topScenes.slice(0, 3);
+    const details: IntegrationTile['details'] = [];
+    if (rejectedRate !== null) details.push({ label: 'Rejected', value: formatPct(rejectedRate) });
+    if (avgQuality !== null) details.push({ label: 'Avg score', value: avgQuality.toFixed(2) });
+    if (rejectedCount !== null) details.push({ label: 'Rejected #', value: String(rejectedCount) });
+    for (const s of top3) {
+      details.push({ label: s.scene, value: String(s.count) });
+    }
+    let state: IntegrationTile['state'] = 'ok';
+    if (rejectedRate !== null && rejectedRate > 0.2) state = 'warn';
+    if (avgQuality !== null && avgQuality < 0.6) state = 'warn';
+    const summaryBits: string[] = [];
+    if (rejectedRate !== null) summaryBits.push(`${formatPct(rejectedRate)} rejected`);
+    if (avgQuality !== null) summaryBits.push(`avg ${avgQuality.toFixed(2)}`);
+    return {
+      id: 'content-engine',
+      title: 'Content Engine Quality',
+      state,
+      summary: summaryBits.length > 0 ? summaryBits.join(' · ') : 'no data',
+      details,
+    };
+  } catch (err) {
+    return errorTile(
+      'content-engine',
+      'Content Engine Quality',
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
+async function fetchRawFor(
+  integration: 'po-receiver' | 'kanban' | 'content-engine',
+  config: IntegrationTilesConfig,
+  fetchImpl: IntegrationFetchImpl,
+): Promise<{
+  integration: string;
+  successRate: number | null;
+  totalAttempts: number | null;
+  error?: string;
+}> {
+  try {
+    if (integration === 'po-receiver') {
+      const url = `${stripTrailing(config.poReceiverUrl!)}/api/integration/webhook-status`;
+      const res = await fetchImpl(url, {
+        headers: { 'x-api-key': config.poReceiverApiKey! },
+      });
+      if (!res.ok) {
+        return { integration, successRate: null, totalAttempts: null, error: `HTTP ${res.status}` };
+      }
+      const body = (await res.json()) as Record<string, unknown>;
+      const rate = pickNumber(body, ['success_rate', 'successRate']);
+      const normRate = rate !== null && rate > 1 ? rate / 100 : rate;
+      const total = pickNumber(body, ['total', 'total_webhooks']);
+      return { integration, successRate: normRate, totalAttempts: total };
+    }
+    if (integration === 'kanban') {
+      const url = `${stripTrailing(config.kanbanUrl!)}/api/webhooks/po-receiver/stats`;
+      const res = await fetchImpl(url, {
+        headers: { 'x-api-key': config.kanbanApiKey! },
+      });
+      if (!res.ok) {
+        return { integration, successRate: null, totalAttempts: null, error: `HTTP ${res.status}` };
+      }
+      const body = (await res.json()) as Record<string, unknown>;
+      const total = pickNumber(body, ['total_received', 'totalReceived']) ?? 0;
+      const unmatched = pickNumber(body, ['unmatched_count', 'unmatched']) ?? 0;
+      const rate = total > 0 ? Math.max(0, (total - unmatched) / total) : null;
+      return { integration, successRate: rate, totalAttempts: total };
+    }
+    // content-engine
+    const url = `${stripTrailing(config.contentEngineUrl!)}/api/integration/prompt-quality-stats`;
+    const res = await fetchImpl(url, {
+      headers: { 'x-api-key': config.contentEngineApiKey! },
+    });
+    if (!res.ok) {
+      return { integration, successRate: null, totalAttempts: null, error: `HTTP ${res.status}` };
+    }
+    const body = (await res.json()) as Record<string, unknown>;
+    const rejectedRate = pickNumber(body, ['rejected_rate', 'rejectedRate']);
+    const normRejected =
+      rejectedRate !== null && rejectedRate > 1 ? rejectedRate / 100 : rejectedRate;
+    const rate = normRejected !== null ? Math.max(0, 1 - normRejected) : null;
+    const rejectedCount = pickNumber(body, ['rejected_count', 'rejectedCount']) ?? 0;
+    // We don't always have a "total" — fall back to rejectedCount / rejected_rate.
+    let total: number | null = null;
+    if (normRejected !== null && normRejected > 0) {
+      total = Math.round(rejectedCount / normRejected);
+    } else if (rejectedCount === 0) {
+      total = 0;
+    }
+    return { integration, successRate: rate, totalAttempts: total };
+  } catch (err) {
+    return {
+      integration,
+      successRate: null,
+      totalAttempts: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 function notConfigured(id: string, title: string): IntegrationTile {
   return {
     id,
@@ -250,5 +451,7 @@ export function loadIntegrationTilesConfig(
     poReceiverApiKey: env.PO_RECEIVER_API_KEY || undefined,
     kanbanUrl: env.KANBAN_URL || undefined,
     kanbanApiKey: env.KANBAN_API_KEY || undefined,
+    contentEngineUrl: env.CONTENT_ENGINE_URL || undefined,
+    contentEngineApiKey: env.CONTENT_ENGINE_API_KEY || undefined,
   };
 }

@@ -135,6 +135,11 @@ describe('GET /api/incidents', () => {
       getIncidentById: jest.fn(() => null),
       addIncidentNote: jest.fn(() => null),
       getIncidentNotes: jest.fn(() => []),
+      recordIntegrationStat: jest.fn(),
+      listIntegrationStats: jest.fn(() => []),
+      recordPruneRun: jest.fn(() => 1),
+      getLatestPruneRun: jest.fn(() => null),
+      computeIncidentStats: jest.fn(() => ({ incidentCount: 0, totalDowntimeMin: 0, mtbfHours: null, mttrMinutes: null })),
       close: jest.fn(),
     };
     const app = createApp({ ...deps, historyStore: broken });
@@ -219,6 +224,11 @@ describe('GET / with recent incidents', () => {
       getIncidentById: jest.fn(() => null),
       addIncidentNote: jest.fn(() => null),
       getIncidentNotes: jest.fn(() => []),
+      recordIntegrationStat: jest.fn(),
+      listIntegrationStats: jest.fn(() => []),
+      recordPruneRun: jest.fn(() => 1),
+      getLatestPruneRun: jest.fn(() => null),
+      computeIncidentStats: jest.fn(() => ({ incidentCount: 0, totalDowntimeMin: 0, mtbfHours: null, mttrMinutes: null })),
       close: jest.fn(),
     };
     const app = createApp({ ...deps, historyStore: broken });

@@ -318,4 +318,48 @@ describe('sendWeeklyReport', () => {
     expect(captured[0].subject).toMatch(/1 incident$/);
     store.close();
   });
+
+  it('appends "This week\'s fixes" section when fixes are provided', async () => {
+    const now = Date.parse('2026-04-18T00:00:00.000Z');
+    const store = new SqliteHistoryStore({ filePath: ':memory:', now: () => now });
+    const captured: EmailMessage[] = [];
+    const sender: EmailSender = {
+      send: async (msg) => { captured.push(msg); return { delivered: true, transport: 'console' }; },
+    };
+    await sendWeeklyReport({
+      apps: apps(),
+      store,
+      sender,
+      to: 'x',
+      nowMs: now,
+      fixes: [
+        {
+          owner: 'dearborndenim',
+          repo: 'alpha',
+          sha: 'abc1234',
+          shortSha: 'abc1234',
+          message: 'fix: X',
+          date: '2026-04-17T00:00:00Z',
+        },
+      ],
+    });
+    expect(captured[0].text).toContain("This week's fixes");
+    expect(captured[0].text).toContain('dearborndenim/alpha: fix: X (abc1234)');
+    store.close();
+  });
+
+  it('omits the fixes section when no fixes are provided', () => {
+    const data = {
+      windowDays: 7,
+      generatedAt: 'x',
+      incidentCount: 0,
+      closedCount: 0,
+      openCount: 0,
+      uptimeRollup: [],
+      topDowntime: [],
+      longestIncidents: [],
+    };
+    const text = renderWeeklyReportText(data);
+    expect(text).not.toContain("This week's fixes");
+  });
 });

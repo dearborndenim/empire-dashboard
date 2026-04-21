@@ -27,12 +27,21 @@ export interface RenderIncident {
   notes?: RenderIncidentNote[];
 }
 
+export interface RenderPruneRun {
+  ranAt: string;
+  deletedCount: number;
+  deletedNotesCount: number;
+  ageHours: number | null;
+}
+
 export interface RenderOptions {
   generatedAt: string;
   /** Recent incidents (closed or still-open) to surface in the sidebar panel. */
   recentIncidents?: RenderIncident[];
   /** Integration observability tiles (PO receiver, kanban inbound, etc.). */
   integrationTiles?: IntegrationTile[];
+  /** Latest retention prune audit row for the home page banner. */
+  latestPruneRun?: RenderPruneRun | null;
 }
 
 export function formatIncidentDuration(minutes: number | null, open: boolean): string {
@@ -46,6 +55,22 @@ export function formatIncidentDuration(minutes: number | null, open: boolean): s
   const d = Math.floor(h / 24);
   const hr = h % 24;
   return hr === 0 ? `${d}d` : `${d}d${hr}h`;
+}
+
+function renderPruneBanner(run: RenderPruneRun | null | undefined): string {
+  if (!run) return '';
+  const age =
+    run.ageHours !== null && Number.isFinite(run.ageHours)
+      ? run.ageHours < 1
+        ? '<1h ago'
+        : run.ageHours < 48
+          ? `${Math.round(run.ageHours)}h ago`
+          : `${Math.round(run.ageHours / 24)}d ago`
+      : 'unknown';
+  const ran = escapeHtml(run.ranAt);
+  return `<div class="prune-banner" title="Last retention prune ran ${ran}">
+    Retention prune: last run ${escapeHtml(age)} (${run.deletedCount} incident${run.deletedCount === 1 ? '' : 's'}, ${run.deletedNotesCount} note${run.deletedNotesCount === 1 ? '' : 's'} deleted)
+  </div>`;
 }
 
 function renderIncidentsPanel(incidents: RenderIncident[] | undefined): string {
@@ -91,6 +116,23 @@ ${rows}
   </section>`;
 }
 
+function renderTileSparkline(
+  points: IntegrationTile['sparkline'] | undefined,
+): string {
+  if (!points || points.length === 0) return '';
+  // Color bars by success rate: >=99% green, >=80% yellow, otherwise red.
+  const bars = points
+    .map((p) => {
+      const rate = typeof p.successRate === 'number' ? p.successRate : 0;
+      const normalized = rate > 1 ? rate / 100 : rate;
+      const color = normalized >= 0.99 ? 'green' : normalized >= 0.8 ? 'yellow' : 'red';
+      const title = `${escapeHtml(p.date)} · ${(normalized * 100).toFixed(1)}%`;
+      return `<span class="tile__spark-bar tile__spark-bar--${color}" title="${title}" aria-hidden="true"></span>`;
+    })
+    .join('');
+  return `<div class="tile__spark" role="img" aria-label="7 day success-rate sparkline">${bars}</div>`;
+}
+
 function renderIntegrationTiles(tiles: IntegrationTile[] | undefined): string {
   if (!tiles || tiles.length === 0) return '';
   const cards = tiles
@@ -109,10 +151,12 @@ function renderIntegrationTiles(tiles: IntegrationTile[] | undefined): string {
       const errorBlock = tile.error
         ? `<div class="tile__error">${escapeHtml(tile.error)}</div>`
         : '';
+      const sparkBlock = renderTileSparkline(tile.sparkline);
       return `<div class="${stateClass}">
         <div class="tile__title">${title}</div>
         <div class="tile__summary">${summary}</div>
         ${detailsBlock}
+        ${sparkBlock}
         ${errorBlock}
       </div>`;
     })
@@ -139,6 +183,80 @@ function renderLogsLink(url: string | undefined): string {
     return `<a class="card__logs" href="${safe}" target="_blank" rel="noopener" onclick="event.stopPropagation()">logs</a>`;
   }
   return `<span class="card__logs card__logs--disabled" aria-disabled="true" title="No Railway project/service configured">logs</span>`;
+}
+
+export interface RenderIncidentsPageOptions {
+  generatedAt: string;
+  appStats: Array<{
+    app: string;
+    mtbfHours: number | null;
+    mttrMinutes: number | null;
+    incidentCount: number;
+    totalDowntimeMin: number;
+  }>;
+  recentIncidents: RenderIncident[];
+}
+
+export function formatMtbfHours(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return '—';
+  if (value < 1) return '<1h';
+  if (value < 48) return `${Math.round(value)}h`;
+  const days = value / 24;
+  return `${days.toFixed(1)}d`;
+}
+
+export function formatMttrMinutes(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return '—';
+  if (value < 1) return '<1m';
+  if (value < 60) return `${Math.round(value)}m`;
+  const hours = Math.floor(value / 60);
+  const mins = Math.round(value % 60);
+  return mins === 0 ? `${hours}h` : `${hours}h${mins}m`;
+}
+
+export function renderIncidentsPage(opts: RenderIncidentsPageOptions): string {
+  const cards = opts.appStats
+    .map((s) => {
+      return `<div class="incident-stats__card">
+        <div class="incident-stats__app">${escapeHtml(s.app)}</div>
+        <div class="incident-stats__row"><span class="incident-stats__label">incidents</span> <span class="incident-stats__value">${s.incidentCount}</span></div>
+        <div class="incident-stats__row"><span class="incident-stats__label">downtime</span> <span class="incident-stats__value">${escapeHtml(formatMttrMinutes(s.totalDowntimeMin))}</span></div>
+        <div class="incident-stats__row"><span class="incident-stats__label">MTTR</span> <span class="incident-stats__value">${escapeHtml(formatMttrMinutes(s.mttrMinutes))}</span></div>
+        <div class="incident-stats__row"><span class="incident-stats__label">MTBF</span> <span class="incident-stats__value">${escapeHtml(formatMtbfHours(s.mtbfHours))}</span></div>
+      </div>`;
+    })
+    .join('\n');
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Incidents · Empire Dashboard</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="wrap">
+    <header class="head">
+      <h1>Incidents</h1>
+      <div class="generated">Generated ${escapeHtml(opts.generatedAt)}</div>
+    </header>
+    <section class="incident-stats">
+      <h2 class="incident-stats__title">Per-app (7d) MTBF / MTTR</h2>
+      <div class="incident-stats__grid">
+${cards}
+      </div>
+    </section>
+    ${renderIncidentsPanel(opts.recentIncidents)}
+    <footer class="foot">
+      <a href="/">← home</a>
+      &middot;
+      <a href="/api/incidents">/api/incidents</a>
+      &middot;
+      <a href="/api/incidents/stats?app=${escapeHtml(opts.appStats[0]?.app ?? 'App')}">/api/incidents/stats</a>
+    </footer>
+  </main>
+</body>
+</html>`;
 }
 
 export function renderDashboard(statuses: AppStatus[], opts: RenderOptions): string {
@@ -194,6 +312,7 @@ export function renderDashboard(statuses: AppStatus[], opts: RenderOptions): str
       </div>
       <div class="generated">Generated ${escapeHtml(opts.generatedAt)}</div>
     </header>
+    ${renderPruneBanner(opts.latestPruneRun)}
     <section class="grid">
 ${cards}
     </section>

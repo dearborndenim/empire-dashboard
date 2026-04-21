@@ -63,6 +63,45 @@ export interface IncidentsQuery {
   includeNotes?: boolean;
 }
 
+/**
+ * Daily snapshot of an integration's success rate (PO receiver webhooks,
+ * Kanban inbound, Content Engine prompt quality, etc.). One row per
+ * integration per day; newer snapshots for the same day overwrite the row
+ * so the cron can run multiple times safely.
+ */
+export interface IntegrationStatRow {
+  integration_name: string;
+  /** YYYY-MM-DD (UTC by convention) */
+  date: string;
+  /** 0..1 fraction. */
+  success_rate: number;
+  total_attempts: number;
+  snapshot_at: string;
+}
+
+/** Audit trail for retention prune jobs. */
+export interface PruneRunRow {
+  id: number;
+  ran_at: string;
+  deleted_count: number;
+  deleted_notes_count: number;
+}
+
+export interface IncidentStatsQuery {
+  app: string;
+  days?: number;
+  nowMs?: number;
+}
+
+export interface IncidentStats {
+  incidentCount: number;
+  totalDowntimeMin: number;
+  /** Mean time between failures in hours. Null when <2 incidents in window. */
+  mtbfHours: number | null;
+  /** Mean time to recovery in minutes. Null when no closed incidents. */
+  mttrMinutes: number | null;
+}
+
 export interface HistoryStoreOptions {
   filePath: string;
   retentionDays?: number;
@@ -86,6 +125,11 @@ export interface HistoryStore {
   getIncidentById(id: number): IncidentRow | null;
   addIncidentNote(incidentId: number, note: string, atIso?: string): IncidentNote | null;
   getIncidentNotes(incidentId: number): IncidentNote[];
+  recordIntegrationStat(row: IntegrationStatRow): void;
+  listIntegrationStats(integrationName: string, days: number, nowMs?: number): IntegrationStatRow[];
+  recordPruneRun(row: Omit<PruneRunRow, 'id'>): number;
+  getLatestPruneRun(): PruneRunRow | null;
+  computeIncidentStats(query: IncidentStatsQuery): IncidentStats;
   close(): void;
 }
 
@@ -140,6 +184,24 @@ export class SqliteHistoryStore implements HistoryStore {
       );
       CREATE INDEX IF NOT EXISTS idx_incident_notes_incident
         ON incident_notes(incident_id, at);
+      CREATE TABLE IF NOT EXISTS integration_stats_history (
+        integration_name TEXT NOT NULL,
+        date TEXT NOT NULL,
+        success_rate REAL NOT NULL,
+        total_attempts INTEGER NOT NULL,
+        snapshot_at TEXT NOT NULL,
+        PRIMARY KEY (integration_name, date)
+      );
+      CREATE INDEX IF NOT EXISTS idx_integration_stats_name_date
+        ON integration_stats_history(integration_name, date);
+      CREATE TABLE IF NOT EXISTS prune_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ran_at TEXT NOT NULL,
+        deleted_count INTEGER NOT NULL,
+        deleted_notes_count INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_prune_runs_ran_at
+        ON prune_runs(ran_at);
     `);
   }
 
@@ -367,6 +429,154 @@ export class SqliteHistoryStore implements HistoryStore {
         'SELECT id, incident_id, at, note FROM incident_notes WHERE incident_id = ? ORDER BY at ASC, id ASC',
       )
       .all(incidentId) as IncidentNote[];
+  }
+
+  /**
+   * Upsert a per-integration per-day snapshot of success_rate + total_attempts.
+   * `(integration_name, date)` is the primary key so repeated snapshots on the
+   * same day overwrite cleanly. `snapshot_at` records when we last fetched.
+   */
+  recordIntegrationStat(row: IntegrationStatRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO integration_stats_history
+           (integration_name, date, success_rate, total_attempts, snapshot_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(integration_name, date) DO UPDATE SET
+           success_rate = excluded.success_rate,
+           total_attempts = excluded.total_attempts,
+           snapshot_at = excluded.snapshot_at`,
+      )
+      .run(
+        row.integration_name,
+        row.date,
+        row.success_rate,
+        row.total_attempts,
+        row.snapshot_at,
+      );
+  }
+
+  /**
+   * List integration stats for an integration over the last `days`. Rows are
+   * returned in ascending date order so callers can render a sparkline
+   * left-to-right.
+   */
+  listIntegrationStats(
+    integrationName: string,
+    days: number,
+    nowMs?: number,
+  ): IntegrationStatRow[] {
+    const cutoff = new Date(
+      (nowMs ?? this.now()) - days * 86400_000,
+    ).toISOString();
+    const cutoffDate = cutoff.slice(0, 10);
+    return this.db
+      .prepare(
+        `SELECT integration_name, date, success_rate, total_attempts, snapshot_at
+           FROM integration_stats_history
+          WHERE integration_name = ? AND date >= ?
+          ORDER BY date ASC`,
+      )
+      .all(integrationName, cutoffDate) as IntegrationStatRow[];
+  }
+
+  /** Insert a prune run audit row. Returns the new row id. */
+  recordPruneRun(row: Omit<PruneRunRow, 'id'>): number {
+    const result = this.db
+      .prepare(
+        'INSERT INTO prune_runs (ran_at, deleted_count, deleted_notes_count) VALUES (?, ?, ?)',
+      )
+      .run(row.ran_at, row.deleted_count, row.deleted_notes_count);
+    return Number(result.lastInsertRowid);
+  }
+
+  /** Most recent prune audit row (by `ran_at`), or null if none. */
+  getLatestPruneRun(): PruneRunRow | null {
+    const row = this.db
+      .prepare(
+        'SELECT id, ran_at, deleted_count, deleted_notes_count FROM prune_runs ORDER BY ran_at DESC LIMIT 1',
+      )
+      .get() as PruneRunRow | undefined;
+    return row ?? null;
+  }
+
+  /**
+   * Compute MTBF (mean time between failures) + MTTR (mean time to recovery)
+   * for an app over the last `days`. Open incidents contribute to downtime
+   * (their running duration is `now - start`) but not to MTTR, which only
+   * averages closed incidents' durations.
+   *
+   * MTBF averages the gaps between consecutive incidents (end of one ->
+   * start of the next). Requires at least two incidents to produce a value.
+   */
+  computeIncidentStats(query: IncidentStatsQuery): IncidentStats {
+    const days = query.days ?? 7;
+    const nowMs = query.nowMs ?? this.now();
+    const rows = this.listIncidents({
+      days,
+      app: query.app,
+      nowMs,
+      limit: 10000,
+    });
+    if (rows.length === 0) {
+      return {
+        incidentCount: 0,
+        totalDowntimeMin: 0,
+        mtbfHours: null,
+        mttrMinutes: null,
+      };
+    }
+
+    let totalDowntimeMin = 0;
+    let closedCount = 0;
+    let closedTotal = 0;
+    for (const r of rows) {
+      if (typeof r.duration_min === 'number') {
+        totalDowntimeMin += r.duration_min;
+        closedCount += 1;
+        closedTotal += r.duration_min;
+      } else if (r.incident_end === null) {
+        const start = Date.parse(r.incident_start);
+        if (Number.isFinite(start)) {
+          totalDowntimeMin += Math.max(0, (nowMs - start) / 60000);
+        }
+      }
+    }
+
+    const mttrMinutes = closedCount > 0 ? closedTotal / closedCount : null;
+
+    // Sort by start ascending to compute gaps.
+    const sorted = [...rows].sort((a, b) => {
+      const ams = Date.parse(a.incident_start);
+      const bms = Date.parse(b.incident_start);
+      return ams - bms;
+    });
+    let mtbfHours: number | null = null;
+    if (sorted.length >= 2) {
+      let gapSumMs = 0;
+      let gapCount = 0;
+      for (let i = 1; i < sorted.length; i++) {
+        const prev = sorted[i - 1];
+        const curr = sorted[i];
+        const prevEndMs = prev.incident_end
+          ? Date.parse(prev.incident_end)
+          : nowMs;
+        const currStartMs = Date.parse(curr.incident_start);
+        if (Number.isFinite(prevEndMs) && Number.isFinite(currStartMs)) {
+          const gap = Math.max(0, currStartMs - prevEndMs);
+          gapSumMs += gap;
+          gapCount += 1;
+        }
+      }
+      if (gapCount > 0) mtbfHours = gapSumMs / gapCount / 3600_000;
+    }
+
+    return {
+      incidentCount: rows.length,
+      totalDowntimeMin,
+      mtbfHours,
+      mttrMinutes,
+    };
   }
 
   close(): void {

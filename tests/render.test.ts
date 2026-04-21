@@ -217,6 +217,95 @@ describe('renderDashboard', () => {
     expect(html).toContain('incident__notes');
   });
 
+  it('renders the integration tile sparkline when points are provided', () => {
+    const html = renderDashboard(statuses, {
+      generatedAt: 'x',
+      integrationTiles: [
+        {
+          id: 'po-receiver',
+          title: 'PO Receiver Webhooks',
+          state: 'ok',
+          summary: '99% success',
+          sparkline: [
+            { date: '2026-04-18', successRate: 0.995, totalAttempts: 100 },
+            { date: '2026-04-19', successRate: 0.80, totalAttempts: 90 },
+            { date: '2026-04-20', successRate: 0.70, totalAttempts: 80 },
+          ],
+        },
+      ],
+    });
+    expect(html).toContain('tile__spark');
+    expect(html).toContain('tile__spark-bar--green');
+    expect(html).toContain('tile__spark-bar--yellow');
+    expect(html).toContain('tile__spark-bar--red');
+  });
+
+  it('omits tile sparkline when no points', () => {
+    const html = renderDashboard(statuses, {
+      generatedAt: 'x',
+      integrationTiles: [
+        {
+          id: 'po-receiver',
+          title: 'PO Receiver Webhooks',
+          state: 'ok',
+          summary: '99% success',
+        },
+      ],
+    });
+    expect(html).not.toContain('tile__spark-bar');
+  });
+
+  it('renders the prune audit banner when latestPruneRun is provided', () => {
+    const html = renderDashboard(statuses, {
+      generatedAt: 'x',
+      latestPruneRun: {
+        ranAt: '2026-04-20T08:00:00.000Z',
+        deletedCount: 3,
+        deletedNotesCount: 2,
+        ageHours: 5,
+      },
+    });
+    expect(html).toContain('prune-banner');
+    expect(html).toContain('5h ago');
+    expect(html).toContain('3 incidents');
+    expect(html).toContain('2 notes');
+  });
+
+  it('handles singular incident/note counts in prune banner', () => {
+    const html = renderDashboard(statuses, {
+      generatedAt: 'x',
+      latestPruneRun: {
+        ranAt: '2026-04-20T08:00:00.000Z',
+        deletedCount: 1,
+        deletedNotesCount: 1,
+        ageHours: 0.5,
+      },
+    });
+    expect(html).toContain('1 incident,');
+    expect(html).toContain('1 note ');
+    expect(html).toContain('&lt;1h ago');
+  });
+
+  it('renders prune banner with day-scale age', () => {
+    const html = renderDashboard(statuses, {
+      generatedAt: 'x',
+      latestPruneRun: {
+        ranAt: '2026-04-15T08:00:00.000Z',
+        deletedCount: 10,
+        deletedNotesCount: 4,
+        ageHours: 72,
+      },
+    });
+    expect(html).toContain('3d ago');
+  });
+
+  it('omits the prune banner when latestPruneRun is null/undefined', () => {
+    const html = renderDashboard(statuses, { generatedAt: 'x' });
+    expect(html).not.toContain('prune-banner');
+    const html2 = renderDashboard(statuses, { generatedAt: 'x', latestPruneRun: null });
+    expect(html2).not.toContain('prune-banner');
+  });
+
   it('renders tile error banner when tile has error state', () => {
     const html = renderDashboard(statuses, {
       generatedAt: 'x',

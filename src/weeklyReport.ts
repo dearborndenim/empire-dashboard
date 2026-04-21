@@ -6,8 +6,9 @@
  */
 
 import { AppConfig } from './config';
-import { HistoryStore, IncidentRow } from './historyStore';
+import { HistoryStore } from './historyStore';
 import { EmailMessage, EmailSender } from './email';
+import { GithubFix, renderWeeksFixesSection } from './githubFixes';
 
 export interface WeeklyReportData {
   windowDays: number;
@@ -123,9 +124,13 @@ export function buildWeeklyReportData(opts: BuildReportOptions): WeeklyReportDat
 }
 
 /**
- * Render the WeeklyReportData into a plain-text email body.
+ * Render the WeeklyReportData into a plain-text email body. Optionally
+ * appends a "This week's fixes" section if `fixes` is non-empty.
  */
-export function renderWeeklyReportText(data: WeeklyReportData): string {
+export function renderWeeklyReportText(
+  data: WeeklyReportData,
+  fixes: GithubFix[] = [],
+): string {
   const lines: string[] = [];
   lines.push(`Empire Dashboard — Weekly Summary (last ${data.windowDays} days)`);
   lines.push(`Generated ${data.generatedAt}`);
@@ -181,6 +186,10 @@ export function renderWeeklyReportText(data: WeeklyReportData): string {
     }
   }
   lines.push('');
+  const fixesText = renderWeeksFixesSection(fixes);
+  if (fixesText) {
+    lines.push(fixesText);
+  }
   return lines.join('\n');
 }
 
@@ -200,6 +209,8 @@ export interface SendWeeklyReportOptions extends BuildReportOptions {
   to: string;
   from?: string;
   sender: EmailSender;
+  /** Optional: "this week's fixes" enrichment from GitHub. */
+  fixes?: GithubFix[];
 }
 
 /**
@@ -210,7 +221,7 @@ export async function sendWeeklyReport(
   opts: SendWeeklyReportOptions,
 ): Promise<{ data: WeeklyReportData; delivered: boolean; transport: string }> {
   const data = buildWeeklyReportData(opts);
-  const text = renderWeeklyReportText(data);
+  const text = renderWeeklyReportText(data, opts.fixes ?? []);
   const message: EmailMessage = {
     to: opts.to,
     from: opts.from,

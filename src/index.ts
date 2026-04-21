@@ -12,6 +12,12 @@ import {
   IntegrationTilesFetcher,
   loadIntegrationTilesConfig,
 } from './integrationTiles';
+import { snapshotIntegrationStats } from './integrationStatsJob';
+import {
+  GithubFixesClient,
+  fetchThisWeeksFixes,
+  octokitCommitFetcher,
+} from './githubFixes';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -61,6 +67,14 @@ async function main(): Promise<void> {
   const integrationConfig = loadIntegrationTilesConfig(process.env);
   const integrationTiles = new IntegrationTilesFetcher({
     config: integrationConfig,
+    sparklineResolver: historyStore
+      ? (id) =>
+          historyStore!.listIntegrationStats(id, 7).map((r) => ({
+            date: r.date,
+            successRate: r.success_rate,
+            totalAttempts: r.total_attempts,
+          }))
+      : undefined,
   });
 
   const app = createApp({
@@ -101,6 +115,16 @@ async function main(): Promise<void> {
   void refresh();
   const timer = setInterval(() => void refresh(), config.pollIntervalMs);
 
+  // Optional GitHub "This week's fixes" section on the weekly report. Only
+  // activates when GITHUB_TOKEN is set; otherwise we gracefully omit.
+  const fixesClient = config.githubToken
+    ? new GithubFixesClient({
+        fetcher: octokitCommitFetcher(
+          new Octokit({ auth: config.githubToken }) as unknown as Parameters<typeof octokitCommitFetcher>[0],
+        ),
+      })
+    : null;
+
   // Weekly summary email — Monday 7 AM CT (America/Chicago).
   const weeklyReportTo = process.env.WEEKLY_REPORT_TO ?? 'rob@dearborndenim.com';
   const weeklyReportFrom = process.env.WEEKLY_REPORT_FROM;
@@ -113,15 +137,32 @@ async function main(): Promise<void> {
       timezone: 'America/Chicago',
       run: async () => {
         try {
+          // If we have a GitHub client, pull per-app latest commits.
+          const fixes = fixesClient
+            ? await fetchThisWeeksFixes({
+                owner: config.githubOwner,
+                repos: config.apps.map((a) => {
+                  // repo field is "owner/repo"; we want just the repo portion
+                  const slash = a.repo.indexOf('/');
+                  return slash >= 0 ? a.repo.slice(slash + 1) : a.repo;
+                }),
+                fetcher: (opts) => fixesClient.getLatestCommit(opts.owner, opts.repo).then((fix) =>
+                  fix
+                    ? { sha: fix.sha, message: fix.message, date: fix.date }
+                    : null,
+                ),
+              })
+            : [];
           const result = await sendWeeklyReport({
             apps: config.apps,
             store: historyStore!,
             sender: emailSelection.sender,
             to: weeklyReportTo,
             from: weeklyReportFrom,
+            fixes,
           });
           console.log(
-            `[empire-dashboard] weekly report sent via ${result.transport} (incidents=${result.data.incidentCount})`,
+            `[empire-dashboard] weekly report sent via ${result.transport} (incidents=${result.data.incidentCount}, fixes=${fixes.length})`,
           );
         } catch (err) {
           console.error('[empire-dashboard] weekly report failed:', err);
@@ -140,6 +181,13 @@ async function main(): Promise<void> {
       run: () => {
         try {
           const removed = historyStore!.pruneIncidents(config.incidentsRetentionDays);
+          historyStore!.recordPruneRun({
+            ran_at: new Date().toISOString(),
+            // We don't currently track note deletions separately from
+            // cascading, but leave this pre-computed for future audits.
+            deleted_count: removed,
+            deleted_notes_count: 0,
+          });
           console.log(
             `[empire-dashboard] incident prune removed ${removed} closed incidents older than ${config.incidentsRetentionDays}d`,
           );
@@ -150,11 +198,32 @@ async function main(): Promise<void> {
     });
   }
 
+  // Daily integration stats snapshot — 3 AM America/Chicago (alongside prune).
+  let dailyIntegrationSnapshotJob: { stop(): void } | undefined;
+  if (historyStore) {
+    dailyIntegrationSnapshotJob = startDailyJob({
+      name: 'integration-stats-snapshot',
+      hourLocal: 3,
+      timezone: 'America/Chicago',
+      run: async () => {
+        try {
+          await snapshotIntegrationStats({
+            store: historyStore!,
+            fetcher: integrationTiles,
+          });
+        } catch (err) {
+          console.error('[empire-dashboard] integration stats snapshot failed:', err);
+        }
+      },
+    });
+  }
+
   const shutdown = (signal: string): void => {
     console.log(`[empire-dashboard] ${signal} received, shutting down`);
     clearInterval(timer);
     if (weeklyJob) weeklyJob.stop();
     if (dailyPruneJob) dailyPruneJob.stop();
+    if (dailyIntegrationSnapshotJob) dailyIntegrationSnapshotJob.stop();
     if (historyStore) {
       try { historyStore.close(); } catch { /* ignore */ }
     }

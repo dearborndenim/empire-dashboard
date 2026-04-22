@@ -7,7 +7,40 @@ touched. Yellow = up but idle. Red = down. Minimal, clean, fast — a v1
 monitor that we can layer features onto (alerting, incident history,
 per-user views) as the empire grows.
 
-## Current state — 82% (2026-04-20)
+## Current state — 85% (2026-04-21)
+- Integration alerts + incidents v5 landed:
+  * `AlertSender` interface with `TeamsAlertSender` (MessageCard schema, 5xx/
+    network retryable signaling), `ConsoleAlertSender` fallback, `NullAlertSender`
+    drop-all + `selectAlertSender` env selector (TEAMS_WEBHOOK_URL / ALERTS_DISABLED)
+  * `IntegrationAlertMonitor` reads 7-day traffic-weighted success rate from
+    `integration_stats_history` and fires when rate < 80%: posts Teams alert,
+    logs synthetic incident under `integration:<name>`, dedupes via new
+    `integration_alert_state` table (PK integration_name+date). Severity is
+    `critical` when rate < 50% of threshold, else `warning`.
+  * Daily 4 AM America/Chicago `integration-alert-check` job wired in index.ts
+  * Scene-drift tile in `integrationTiles` — consumes content-engine
+    `/api/integration/scene-drift`, severity-weights scenes by z_score +
+    days_since_last_flag (recent repeat offender bonus, 14-day decay), top-3
+    over-represented surfaced in tile details
+- Incidents v5:
+  * `GET /api/incidents/export?days=N&format=csv` — RFC-4180 CSV download
+    (90-day default, clamped [1,365]); stable header includes rootCause,
+    notesCount; attachment Content-Disposition
+  * `root_cause` column added via ALTER TABLE; surfaced through IncidentRow,
+    `setIncidentRootCause`, `topRootCauses`
+  * `POST /api/incidents/:id/note` accepts optional `root_cause` (snake or
+    camel, max 120 chars) alongside the note
+  * `GET /api/incidents/stats` without `app` returns aggregate `perApp` +
+    `topRootCauses` (breaking change — tests updated)
+  * Weekly Monday 7 AM CT email now appends "Per-app MTBF / MTTR (7d)" and
+    "Top root causes (7d)" sections via `buildWeeklyReportData`
+- Prior-release features preserved: incident notes + admin-token POST, SMTP
+  sender, longest-downtimes + fixes sections, PO Receiver / Kanban / Content
+  Engine tiles, prune banner, 30-day closed-incident retention cron
+- 362 tests passing (up from 323, +39), 97.13% statement / 87.7% branch /
+  97.87% line coverage
+
+## Prior state — 82% (2026-04-20)
 - Incidents v4 ("stats + audit + fixes"):
   * `GET /api/incidents/stats?app=<name>&days=N` — MTBF (hours), MTTR (min),
     incident_count, total_downtime_minutes (days clamped [1,90])
@@ -91,6 +124,9 @@ dearborn-ai-agents, DDA-CS-Manager, diamond-pickaxe-returns-processor.
 - Configure real SMTP creds on Railway (SMTP_HOST/PORT/USER/PASS/FROM)
 - Wire PO_RECEIVER_URL + KANBAN_URL + CONTENT_ENGINE_URL + api keys on Railway so tiles light up
 - Set GITHUB_TOKEN on Railway so the weekly "This week's fixes" section pulls real commits
+- Configure TEAMS_WEBHOOK_URL on Railway to activate the Teams alert transport (falls back to stdout today)
+- Render root_cause in the incidents HTML UI + an editor UI for setting/clearing the tag
+- Extend IntegrationAlertMonitor to cover additional integrations as new tiles are added
 - Alert to Telegram/Slack on each incident transition (reuse `IncidentTracker`)
 - Per-app drilldown page with recent commits + incident history + notes editor
 - Auto-refresh the HTML page every 60s (or use SSE/polling on client)
@@ -103,6 +139,40 @@ dearborn-ai-agents, DDA-CS-Manager, diamond-pickaxe-returns-processor.
 _(none yet — newly built)_
 
 ## Build history
+### 2026-04-21 — integration alerts + incidents v5
+- Feature branch `feat/integration-alerts-and-incidents-v5`, merged to `main`
+- `alertSender.ts` (new): `AlertSender` interface, `AlertMessage`,
+  `AlertSeverity`, `TeamsAlertSender` (MessageCard w/ severity colors, 5xx
+  retryable signaling, error body preview), `ConsoleAlertSender` logging to
+  console.log/warn/error by severity, `NullAlertSender` drop-all,
+  `selectAlertSender(env)` (ALERTS_DISABLED / TEAMS_WEBHOOK_URL / fallback)
+- `integrationAlertMonitor.ts` (new): traffic-weighted 7d success-rate monitor,
+  per-day dedupe via `integration_alert_state`, synthetic-incident logger under
+  `integration:<name>`, graceful on sender/store errors, severity escalation
+- `historyStore.ts`: new `integration_alert_state` table + `recordIntegrationAlert`
+  (insert-or-ignore), `hasIntegrationAlerted`. Added `root_cause` column via
+  PRAGMA-gated ALTER TABLE, `setIncidentRootCause`, `topRootCauses`; select
+  statements updated to surface root_cause
+- `integrationTiles.ts`: new `fetchSceneDriftTile` + `computeDriftSeverity`
+  (exported for tests); consumes `/api/integration/scene-drift`, renders top-3
+  over-represented scenes with z-score + days_since_last_flag recency weighting
+- `app.ts`: new `csvCell`, `INCIDENTS_CSV_HEADER`, `serializeIncidentsCsv`;
+  new `GET /api/incidents/export?days=N&format=csv` (90d default, clamped
+  [1,365], 400 on bad format, 503 w/o store); `/api/incidents/stats` without
+  `app` param now returns aggregate `perApp` + `topRootCauses`; note endpoint
+  accepts optional `root_cause` (max 120 chars) and persists via setIncidentRootCause
+- `weeklyReport.ts`: new `WeeklyMtbfMttrRow` + `WeeklyRootCauseRow`; report
+  data now carries `mtbfMttr` + `topRootCauses`; Monday 7 AM CT email renders
+  "Per-app MTBF / MTTR (7d)" + "Top root causes (7d)" sections
+- `index.ts`: wired `selectAlertSender` + `IntegrationAlertMonitor` into a new
+  daily 4 AM CT `integration-alert-check` job (alongside the 3 AM snapshot +
+  prune); shutdown stops the new job
+- Tests: +39 (323 -> 362). New files: `alertSender.test.ts` (15),
+  `integrationAlertMonitor.test.ts` (6), `sceneDriftTile.test.ts` (6),
+  `incidentsV5.test.ts` (12). Existing mock stores + serialize/weeklyReport
+  fixtures updated for new store methods + rootCause field.
+- Coverage: 97.13% stmt / 87.7% branch / 97.87% line.
+
 ### 2026-04-20 — incidents v4 + historical sparklines + content-engine tile
 - Feature branch `nightly-2026-04-20`, merged to `main`
 - `historyStore.ts`: new `integration_stats_history` table (PRIMARY KEY

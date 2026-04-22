@@ -117,6 +117,7 @@ export interface SerializedIncident {
   end: string | null;
   durationMin: number | null;
   reason: string | null;
+  rootCause: string | null;
   open: boolean;
   notes?: SerializedIncidentNote[];
 }
@@ -130,6 +131,7 @@ export function serializeIncidents(rows: IncidentRow[]): SerializedIncident[] {
       end: r.incident_end,
       durationMin: r.duration_min,
       reason: r.reason,
+      rootCause: r.root_cause ?? null,
       open: r.incident_end === null,
     };
     if (Array.isArray(r.notes)) {
@@ -137,6 +139,51 @@ export function serializeIncidents(rows: IncidentRow[]): SerializedIncident[] {
     }
     return out;
   });
+}
+
+/**
+ * CSV-encode one cell per RFC 4180: double-quote-wrap if the value contains
+ * commas/quotes/newlines, and escape embedded quotes by doubling them.
+ */
+export function csvCell(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  const s = String(value);
+  if (/[",\n\r]/.test(s)) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
+export const INCIDENTS_CSV_HEADER = [
+  'id',
+  'app',
+  'start',
+  'end',
+  'durationMin',
+  'reason',
+  'rootCause',
+  'open',
+  'notesCount',
+].join(',');
+
+export function serializeIncidentsCsv(incidents: SerializedIncident[]): string {
+  const lines = [INCIDENTS_CSV_HEADER];
+  for (const i of incidents) {
+    lines.push(
+      [
+        csvCell(i.id),
+        csvCell(i.app),
+        csvCell(i.start),
+        csvCell(i.end ?? ''),
+        csvCell(i.durationMin ?? ''),
+        csvCell(i.reason ?? ''),
+        csvCell(i.rootCause ?? ''),
+        csvCell(i.open ? 'true' : 'false'),
+        csvCell(i.notes?.length ?? 0),
+      ].join(','),
+    );
+  }
+  return lines.join('\r\n') + '\r\n';
 }
 
 export function createApp(deps: AppDeps): Express {
@@ -172,11 +219,6 @@ export function createApp(deps: AppDeps): Express {
         res.status(503).json({ error: 'history store unavailable' });
         return;
       }
-      const appName = typeof req.query.app === 'string' ? req.query.app.trim() : '';
-      if (!appName) {
-        res.status(400).json({ error: 'query param "app" is required' });
-        return;
-      }
       const daysRaw = req.query.days;
       let days = 7;
       if (typeof daysRaw === 'string') {
@@ -184,6 +226,27 @@ export function createApp(deps: AppDeps): Express {
         if (Number.isFinite(parsed)) {
           days = Math.max(1, Math.min(90, parsed));
         }
+      }
+      const appName = typeof req.query.app === 'string' ? req.query.app.trim() : '';
+      if (!appName) {
+        // Incidents v5: aggregate mode — return per-app stats + top root causes.
+        const perApp = deps.config.apps.map((a) => {
+          const stats = deps.historyStore!.computeIncidentStats({ app: a.name, days });
+          return {
+            app: a.name,
+            mtbfHours: stats.mtbfHours,
+            mttrMinutes: stats.mttrMinutes,
+            incidentCount: stats.incidentCount,
+            totalDowntimeMinutes: stats.totalDowntimeMin,
+          };
+        });
+        const topRootCauses = deps.historyStore.topRootCauses({ days, limit: 5 });
+        res.json({
+          windowDays: days,
+          perApp,
+          topRootCauses,
+        });
+        return;
       }
       const stats = deps.historyStore.computeIncidentStats({ app: appName, days });
       res.json({
@@ -194,6 +257,43 @@ export function createApp(deps: AppDeps): Express {
         incidentCount: stats.incidentCount,
         totalDowntimeMinutes: stats.totalDowntimeMin,
       });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  app.get('/api/incidents/export', (req, res) => {
+    try {
+      if (!deps.historyStore) {
+        res.status(503).json({ error: 'history store unavailable' });
+        return;
+      }
+      const daysRaw = req.query.days;
+      let days = 90;
+      if (typeof daysRaw === 'string') {
+        const parsed = Number(daysRaw);
+        if (Number.isFinite(parsed)) {
+          days = Math.max(1, Math.min(365, parsed));
+        }
+      }
+      const format = typeof req.query.format === 'string' ? req.query.format : 'csv';
+      if (format !== 'csv') {
+        res.status(400).json({ error: "unsupported format (only 'csv' is supported)" });
+        return;
+      }
+      const rows = deps.historyStore.listIncidents({
+        days,
+        limit: 10000,
+        includeNotes: true,
+      });
+      const incidents = serializeIncidents(rows);
+      const csv = serializeIncidentsCsv(incidents);
+      const filename = `incidents-${days}d-${new Date().toISOString().slice(0, 10)}.csv`;
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.send(csv);
     } catch (err) {
       res.status(500).json({
         error: err instanceof Error ? err.message : String(err),
@@ -257,7 +357,7 @@ export function createApp(deps: AppDeps): Express {
         res.status(400).json({ error: 'invalid incident id' });
         return;
       }
-      const body = (req.body ?? {}) as { note?: unknown };
+      const body = (req.body ?? {}) as { note?: unknown; root_cause?: unknown; rootCause?: unknown };
       const note = typeof body.note === 'string' ? body.note.trim() : '';
       if (!note) {
         res.status(400).json({ error: 'note body is required' });
@@ -267,12 +367,33 @@ export function createApp(deps: AppDeps): Express {
         res.status(400).json({ error: 'note exceeds 2000 characters' });
         return;
       }
+      // Optional root_cause tag (incidents v5). Accept both snake + camel.
+      const rootCauseRaw =
+        typeof body.root_cause === 'string'
+          ? body.root_cause
+          : typeof body.rootCause === 'string'
+            ? body.rootCause
+            : null;
+      const rootCause =
+        typeof rootCauseRaw === 'string' ? rootCauseRaw.trim() : null;
+      if (rootCause !== null && rootCause.length > 120) {
+        res.status(400).json({ error: 'root_cause exceeds 120 characters' });
+        return;
+      }
       const saved = deps.historyStore.addIncidentNote(idRaw, note);
       if (!saved) {
         res.status(404).json({ error: 'incident not found' });
         return;
       }
-      res.status(201).json({ note: saved });
+      if (rootCause) {
+        try {
+          deps.historyStore.setIncidentRootCause(idRaw, rootCause);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error('[empire-dashboard] root_cause write failed:', err);
+        }
+      }
+      res.status(201).json({ note: saved, rootCause: rootCause || null });
     } catch (err) {
       res.status(500).json({
         error: err instanceof Error ? err.message : String(err),

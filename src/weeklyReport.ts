@@ -10,6 +10,18 @@ import { HistoryStore } from './historyStore';
 import { EmailMessage, EmailSender } from './email';
 import { GithubFix, renderWeeksFixesSection } from './githubFixes';
 
+export interface WeeklyMtbfMttrRow {
+  app: string;
+  mtbfHours: number | null;
+  mttrMinutes: number | null;
+  incidentCount: number;
+}
+
+export interface WeeklyRootCauseRow {
+  root_cause: string;
+  count: number;
+}
+
 export interface WeeklyReportData {
   windowDays: number;
   generatedAt: string;
@@ -32,6 +44,10 @@ export interface WeeklyReportData {
     reason: string | null;
     notes: Array<{ at: string; note: string }>;
   }>;
+  /** Per-app MTBF / MTTR snapshot for the window (incidents v5). */
+  mtbfMttr: WeeklyMtbfMttrRow[];
+  /** Top-N root causes in the window (incidents v5). */
+  topRootCauses: WeeklyRootCauseRow[];
 }
 
 export interface BuildReportOptions {
@@ -111,6 +127,28 @@ export function buildWeeklyReportData(opts: BuildReportOptions): WeeklyReportDat
     .sort((a, b) => b.durationMin - a.durationMin)
     .slice(0, 3);
 
+  // Incidents v5: per-app MTBF / MTTR snapshot.
+  const mtbfMttr: WeeklyMtbfMttrRow[] = opts.apps.map((app) => {
+    const stats = opts.store.computeIncidentStats({
+      app: app.name,
+      days: windowDays,
+      nowMs,
+    });
+    return {
+      app: app.name,
+      mtbfHours: stats.mtbfHours,
+      mttrMinutes: stats.mttrMinutes,
+      incidentCount: stats.incidentCount,
+    };
+  });
+
+  // Incidents v5: top root causes for the window.
+  const topRootCauses = opts.store.topRootCauses({
+    days: windowDays,
+    nowMs,
+    limit: 5,
+  });
+
   return {
     windowDays,
     generatedAt,
@@ -120,6 +158,8 @@ export function buildWeeklyReportData(opts: BuildReportOptions): WeeklyReportDat
     uptimeRollup,
     topDowntime,
     longestIncidents,
+    mtbfMttr,
+    topRootCauses,
   };
 }
 
@@ -183,6 +223,34 @@ export function renderWeeklyReportText(
           lines.push(`    note @ ${n.at}: ${n.note}`);
         }
       }
+    }
+  }
+  lines.push('');
+  // Incidents v5: per-app MTBF / MTTR section.
+  lines.push('Per-app MTBF / MTTR (7d)');
+  lines.push('------------------------');
+  const withIncidents = data.mtbfMttr
+    .filter((r) => r.incidentCount > 0)
+    .sort((a, b) => (b.mttrMinutes ?? 0) - (a.mttrMinutes ?? 0));
+  if (withIncidents.length === 0) {
+    lines.push('  (no incidents this week)');
+  } else {
+    for (const row of withIncidents) {
+      const mtbf = row.mtbfHours !== null ? `${row.mtbfHours.toFixed(1)}h` : 'n/a';
+      const mttr = row.mttrMinutes !== null ? `${row.mttrMinutes.toFixed(1)}m` : 'n/a';
+      lines.push(
+        `  ${row.app.padEnd(36)} MTBF ${mtbf.padEnd(8)} MTTR ${mttr.padEnd(8)} incidents=${row.incidentCount}`,
+      );
+    }
+  }
+  lines.push('');
+  lines.push('Top root causes (7d)');
+  lines.push('--------------------');
+  if (data.topRootCauses.length === 0) {
+    lines.push('  (no root causes tagged this week)');
+  } else {
+    for (const row of data.topRootCauses) {
+      lines.push(`  ${row.root_cause.padEnd(36)} ${row.count}`);
     }
   }
   lines.push('');

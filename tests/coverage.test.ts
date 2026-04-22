@@ -299,6 +299,10 @@ describe('app.ts — additional error paths', () => {
       recordPruneRun: jest.fn(() => 1),
       getLatestPruneRun: jest.fn(() => null),
       computeIncidentStats: jest.fn(() => { throw new Error('compute boom'); }),
+      recordIntegrationAlert: jest.fn(() => true),
+      hasIntegrationAlerted: jest.fn(() => false),
+      topRootCauses: jest.fn(() => []),
+      setIncidentRootCause: jest.fn(() => false),
       close: jest.fn(),
     };
     const app = createApp({ ...buildDeps(), historyStore: broken });
@@ -327,6 +331,10 @@ describe('app.ts — additional error paths', () => {
       recordPruneRun: jest.fn(() => 1),
       getLatestPruneRun: jest.fn(() => null),
       computeIncidentStats: jest.fn(() => ({ incidentCount: 0, totalDowntimeMin: 0, mtbfHours: null, mttrMinutes: null })),
+      recordIntegrationAlert: jest.fn(() => true),
+      hasIntegrationAlerted: jest.fn(() => false),
+      topRootCauses: jest.fn(() => []),
+      setIncidentRootCause: jest.fn(() => false),
       close: jest.fn(),
     };
     const app = createApp({
@@ -362,6 +370,10 @@ describe('app.ts — additional error paths', () => {
       recordPruneRun: jest.fn(() => 1),
       getLatestPruneRun: jest.fn(() => { throw new Error('prune read fail'); }),
       computeIncidentStats: jest.fn(() => ({ incidentCount: 0, totalDowntimeMin: 0, mtbfHours: null, mttrMinutes: null })),
+      recordIntegrationAlert: jest.fn(() => true),
+      hasIntegrationAlerted: jest.fn(() => false),
+      topRootCauses: jest.fn(() => []),
+      setIncidentRootCause: jest.fn(() => false),
       close: jest.fn(),
     };
     const app = createApp({ ...buildDeps(), historyStore: broken });
@@ -416,6 +428,10 @@ describe('app.ts — additional error paths', () => {
         deleted_notes_count: 0,
       })),
       computeIncidentStats: jest.fn(() => ({ incidentCount: 0, totalDowntimeMin: 0, mtbfHours: null, mttrMinutes: null })),
+      recordIntegrationAlert: jest.fn(() => true),
+      hasIntegrationAlerted: jest.fn(() => false),
+      topRootCauses: jest.fn(() => []),
+      setIncidentRootCause: jest.fn(() => false),
       close: jest.fn(),
     };
     const app = createApp({ ...buildDeps(), historyStore: weirdStore });

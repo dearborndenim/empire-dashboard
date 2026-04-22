@@ -45,12 +45,14 @@ describe('GET /api/incidents/stats', () => {
     expect(res.status).toBe(503);
   });
 
-  it('returns 400 when the app query param is missing', async () => {
+  it('returns aggregate stats when the app query param is missing (incidents v5)', async () => {
     const store = new SqliteHistoryStore({ filePath: ':memory:' });
     const app = createApp({ ...buildDeps(), historyStore: store });
     const res = await request(app).get('/api/incidents/stats');
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/app/);
+    expect(res.status).toBe(200);
+    expect(res.body.windowDays).toBe(7);
+    expect(Array.isArray(res.body.perApp)).toBe(true);
+    expect(Array.isArray(res.body.topRootCauses)).toBe(true);
     store.close();
   });
 
@@ -115,6 +117,10 @@ describe('GET /api/incidents/stats', () => {
       recordPruneRun: jest.fn(() => 1),
       getLatestPruneRun: jest.fn(() => null),
       computeIncidentStats: jest.fn(() => { throw new Error('db boom'); }),
+      recordIntegrationAlert: jest.fn(() => true),
+      hasIntegrationAlerted: jest.fn(() => false),
+      topRootCauses: jest.fn(() => []),
+      setIncidentRootCause: jest.fn(() => false),
       close: jest.fn(),
     };
     const app = createApp({ ...buildDeps(), historyStore: broken });

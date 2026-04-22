@@ -51,8 +51,8 @@ describe('serializeIncidents', () => {
       { id: 2, app_name: 'B', incident_start: 's', incident_end: 'e', duration_min: 4, reason: 'x' },
     ]);
     expect(out).toEqual([
-      { id: 1, app: 'A', start: 's', end: null, durationMin: null, reason: 'r', open: true },
-      { id: 2, app: 'B', start: 's', end: 'e', durationMin: 4, reason: 'x', open: false },
+      { id: 1, app: 'A', start: 's', end: null, durationMin: null, reason: 'r', rootCause: null, open: true },
+      { id: 2, app: 'B', start: 's', end: 'e', durationMin: 4, reason: 'x', rootCause: null, open: false },
     ]);
   });
 });
@@ -140,6 +140,10 @@ describe('GET /api/incidents', () => {
       recordPruneRun: jest.fn(() => 1),
       getLatestPruneRun: jest.fn(() => null),
       computeIncidentStats: jest.fn(() => ({ incidentCount: 0, totalDowntimeMin: 0, mtbfHours: null, mttrMinutes: null })),
+      recordIntegrationAlert: jest.fn(() => true),
+      hasIntegrationAlerted: jest.fn(() => false),
+      topRootCauses: jest.fn(() => []),
+      setIncidentRootCause: jest.fn(() => false),
       close: jest.fn(),
     };
     const app = createApp({ ...deps, historyStore: broken });
@@ -229,6 +233,10 @@ describe('GET / with recent incidents', () => {
       recordPruneRun: jest.fn(() => 1),
       getLatestPruneRun: jest.fn(() => null),
       computeIncidentStats: jest.fn(() => ({ incidentCount: 0, totalDowntimeMin: 0, mtbfHours: null, mttrMinutes: null })),
+      recordIntegrationAlert: jest.fn(() => true),
+      hasIntegrationAlerted: jest.fn(() => false),
+      topRootCauses: jest.fn(() => []),
+      setIncidentRootCause: jest.fn(() => false),
       close: jest.fn(),
     };
     const app = createApp({ ...deps, historyStore: broken });

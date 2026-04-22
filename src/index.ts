@@ -18,6 +18,8 @@ import {
   fetchThisWeeksFixes,
   octokitCommitFetcher,
 } from './githubFixes';
+import { selectAlertSender } from './alertSender';
+import { IntegrationAlertMonitor } from './integrationAlertMonitor';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -218,12 +220,44 @@ async function main(): Promise<void> {
     });
   }
 
+  // Alert sender + integration success-rate monitor (Task 1.2 / 1.4).
+  const alertSelection = selectAlertSender(process.env);
+  console.log(
+    `[empire-dashboard] alert transport: ${alertSelection.transport}${alertSelection.disabled ? ' (ALERTS_DISABLED=1)' : ''}`,
+  );
+
+  let integrationAlertJob: { stop(): void } | undefined;
+  if (historyStore) {
+    const monitor = new IntegrationAlertMonitor({
+      store: historyStore,
+      alertSender: alertSelection.sender,
+    });
+    integrationAlertJob = startDailyJob({
+      name: 'integration-alert-check',
+      hourLocal: 4,
+      timezone: 'America/Chicago',
+      run: async () => {
+        try {
+          const res = await monitor.check();
+          if (res.fired.length > 0) {
+            console.log(
+              `[empire-dashboard] integration alerts fired=${res.fired.length} skipped=${res.skipped.length}`,
+            );
+          }
+        } catch (err) {
+          console.error('[empire-dashboard] integration alert check failed:', err);
+        }
+      },
+    });
+  }
+
   const shutdown = (signal: string): void => {
     console.log(`[empire-dashboard] ${signal} received, shutting down`);
     clearInterval(timer);
     if (weeklyJob) weeklyJob.stop();
     if (dailyPruneJob) dailyPruneJob.stop();
     if (dailyIntegrationSnapshotJob) dailyIntegrationSnapshotJob.stop();
+    if (integrationAlertJob) integrationAlertJob.stop();
     if (historyStore) {
       try { historyStore.close(); } catch { /* ignore */ }
     }

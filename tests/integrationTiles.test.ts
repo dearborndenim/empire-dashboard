@@ -53,7 +53,7 @@ describe('IntegrationTilesFetcher', () => {
       fetchImpl: async () => { throw new Error('should not call fetch'); },
     });
     const tiles = await fetcher.getTiles();
-    expect(tiles).toHaveLength(3);
+    expect(tiles).toHaveLength(4);
     expect(tiles.every((t) => t.state === 'not-configured')).toBe(true);
     for (const t of tiles) expect(t.summary).toBe('Not configured');
   });

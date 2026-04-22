@@ -182,6 +182,10 @@ describe('collectStatuses with history', () => {
       recordPruneRun: jest.fn(() => 1),
       getLatestPruneRun: jest.fn(() => null),
       computeIncidentStats: jest.fn(() => ({ incidentCount: 0, totalDowntimeMin: 0, mtbfHours: null, mttrMinutes: null })),
+      recordIntegrationAlert: jest.fn(() => true),
+      hasIntegrationAlerted: jest.fn(() => false),
+      topRootCauses: jest.fn(() => []),
+      setIncidentRootCause: jest.fn(() => false),
       close: jest.fn(),
     };
     const enriched = { ...deps, historyStore: throwingStore };

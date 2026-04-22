@@ -109,6 +109,7 @@ export class IntegrationTilesFetcher {
       fetchPoReceiverTile(this.config, this.fetchImpl),
       fetchKanbanTile(this.config, this.fetchImpl),
       fetchContentEngineTile(this.config, this.fetchImpl),
+      fetchSceneDriftTile(this.config, this.fetchImpl),
     ]);
     if (this.sparklineResolver) {
       for (const tile of tiles) {
@@ -325,6 +326,121 @@ async function fetchContentEngineTile(
       err instanceof Error ? err.message : String(err),
     );
   }
+}
+
+/**
+ * Scene-drift tile. Consumes the content-engine `/api/integration/scene-drift`
+ * endpoint which emits per-scene distribution stats (count, expected,
+ * z_score, days_since_last_flag). We surface the top over-represented scenes
+ * (positive z-score) and pick a severity based on z-score combined with how
+ * long the scene has been flagged — the less time since last flag, the more
+ * severe (repeat offender).
+ */
+async function fetchSceneDriftTile(
+  config: IntegrationTilesConfig,
+  fetchImpl: IntegrationFetchImpl,
+): Promise<IntegrationTile> {
+  if (!config.contentEngineUrl || !config.contentEngineApiKey) {
+    return notConfigured('scene-drift', 'Scene Distribution Drift');
+  }
+  const url = `${stripTrailing(config.contentEngineUrl)}/api/integration/scene-drift`;
+  try {
+    const res = await fetchImpl(url, {
+      headers: { 'x-api-key': config.contentEngineApiKey },
+    });
+    if (!res.ok) {
+      return errorTile('scene-drift', 'Scene Distribution Drift', `HTTP ${res.status}`);
+    }
+    const body = (await res.json()) as Record<string, unknown>;
+    const scenesRaw = Array.isArray(body.scenes)
+      ? (body.scenes as Array<Record<string, unknown>>)
+      : [];
+    const flagged = scenesRaw
+      .map((s) => parseDriftScene(s))
+      .filter((s): s is SceneDriftScene => s !== null);
+
+    // Over-represented scenes are z > 0. Sort by severity (weighted).
+    const overRepresented = flagged
+      .filter((s) => s.zScore > 0)
+      .map((s) => ({ ...s, severity: computeDriftSeverity(s) }))
+      .sort((a, b) => b.severity - a.severity);
+
+    const top = overRepresented.slice(0, 3);
+
+    const details: IntegrationTile['details'] = [];
+    for (const s of top) {
+      // e.g. "z=2.1  flagged 1d ago"
+      const bits: string[] = [`z=${s.zScore.toFixed(2)}`];
+      if (s.daysSinceLastFlag !== null) {
+        bits.push(
+          s.daysSinceLastFlag < 1
+            ? '<1d ago'
+            : `${Math.round(s.daysSinceLastFlag)}d ago`,
+        );
+      }
+      details.push({ label: s.scene, value: bits.join(' · ') });
+    }
+
+    // State: ok if nothing flagged, warn if any flagged, error-ish if any
+    // repeat offender within 2 days and z > 2.
+    let state: IntegrationTile['state'] = 'ok';
+    if (top.length > 0) state = 'warn';
+
+    const summary =
+      top.length === 0
+        ? 'All scenes balanced'
+        : `${top.length} over-represented`;
+
+    return {
+      id: 'scene-drift',
+      title: 'Scene Distribution Drift',
+      state,
+      summary,
+      details,
+    };
+  } catch (err) {
+    return errorTile(
+      'scene-drift',
+      'Scene Distribution Drift',
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
+interface SceneDriftScene {
+  scene: string;
+  zScore: number;
+  count: number | null;
+  expected: number | null;
+  daysSinceLastFlag: number | null;
+}
+
+function parseDriftScene(raw: Record<string, unknown>): SceneDriftScene | null {
+  const scene = typeof raw.scene === 'string' ? raw.scene : typeof raw.name === 'string' ? raw.name : null;
+  if (!scene) return null;
+  const zScore = pickNumber(raw, ['z_score', 'zScore']);
+  if (zScore === null) return null;
+  const count = pickNumber(raw, ['count']);
+  const expected = pickNumber(raw, ['expected']);
+  const daysSinceLastFlag = pickNumber(raw, [
+    'days_since_last_flag',
+    'daysSinceLastFlag',
+  ]);
+  return { scene, zScore, count, expected, daysSinceLastFlag };
+}
+
+/**
+ * Severity weighting. Scenes with higher z-scores are more severe. Scenes
+ * that were flagged recently (low days_since_last_flag) get a bonus — a
+ * repeat offender at the same z-score is worse than a first-time offender.
+ */
+export function computeDriftSeverity(scene: SceneDriftScene): number {
+  const z = Math.max(0, scene.zScore);
+  const days = scene.daysSinceLastFlag;
+  if (days === null || !Number.isFinite(days)) return z;
+  // Recent repeat offenders get a boost that decays over 14 days.
+  const recencyBoost = Math.max(0, 1 - days / 14);
+  return z * (1 + recencyBoost);
 }
 
 async function fetchRawFor(

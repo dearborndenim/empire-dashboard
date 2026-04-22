@@ -358,6 +358,8 @@ describe('sendWeeklyReport', () => {
       uptimeRollup: [],
       topDowntime: [],
       longestIncidents: [],
+      mtbfMttr: [],
+      topRootCauses: [],
     };
     const text = renderWeeklyReportText(data);
     expect(text).not.toContain("This week's fixes");

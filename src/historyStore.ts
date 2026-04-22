@@ -40,6 +40,8 @@ export interface IncidentRow {
   incident_end: string | null;
   duration_min: number | null;
   reason: string | null;
+  /** Optional operator-tagged root cause. Added in incidents v5. */
+  root_cause?: string | null;
   notes?: IncidentNote[];
 }
 
@@ -87,6 +89,21 @@ export interface PruneRunRow {
   deleted_notes_count: number;
 }
 
+/**
+ * Per-integration per-day alert dedupe row. When the success-rate monitor
+ * fires for integration X on date D, we persist a row so the same alert
+ * doesn't re-fire on subsequent polls within the same day (mirrors the PO
+ * receiver dead-letter spike dedupe pattern).
+ */
+export interface IntegrationAlertStateRow {
+  integration_name: string;
+  /** YYYY-MM-DD */
+  date: string;
+  /** The success rate (0..1) that triggered the alert. */
+  success_rate: number;
+  alerted_at: string;
+}
+
 export interface IncidentStatsQuery {
   app: string;
   days?: number;
@@ -130,6 +147,17 @@ export interface HistoryStore {
   recordPruneRun(row: Omit<PruneRunRow, 'id'>): number;
   getLatestPruneRun(): PruneRunRow | null;
   computeIncidentStats(query: IncidentStatsQuery): IncidentStats;
+  /** Insert an integration-alert dedupe row. Ignores conflicts (idempotent). */
+  recordIntegrationAlert(row: IntegrationAlertStateRow): boolean;
+  /** True when an integration has already alerted on `date` (YYYY-MM-DD). */
+  hasIntegrationAlerted(integrationName: string, date: string): boolean;
+  /** Aggregate counts of incidents grouped by root_cause in a window. */
+  topRootCauses(query: { days?: number; nowMs?: number; limit?: number }): Array<{
+    root_cause: string;
+    count: number;
+  }>;
+  /** Set/overwrite the root_cause column on an incident row. */
+  setIncidentRootCause(incidentId: number, rootCause: string | null): boolean;
   close(): void;
 }
 
@@ -202,7 +230,23 @@ export class SqliteHistoryStore implements HistoryStore {
       );
       CREATE INDEX IF NOT EXISTS idx_prune_runs_ran_at
         ON prune_runs(ran_at);
+      CREATE TABLE IF NOT EXISTS integration_alert_state (
+        integration_name TEXT NOT NULL,
+        date TEXT NOT NULL,
+        success_rate REAL NOT NULL,
+        alerted_at TEXT NOT NULL,
+        PRIMARY KEY (integration_name, date)
+      );
     `);
+
+    // Incidents v5: add root_cause column if missing. sqlite lets us check
+    // via PRAGMA table_info.
+    const incidentColumns = this.db
+      .prepare("PRAGMA table_info('incidents')")
+      .all() as Array<{ name: string }>;
+    if (!incidentColumns.some((c) => c.name === 'root_cause')) {
+      this.db.exec('ALTER TABLE incidents ADD COLUMN root_cause TEXT');
+    }
   }
 
   insert(sample: HistorySample): void {
@@ -360,7 +404,7 @@ export class SqliteHistoryStore implements HistoryStore {
   getOpenIncident(appName: string): IncidentRow | null {
     const row = this.db
       .prepare(
-        'SELECT id, app_name, incident_start, incident_end, duration_min, reason FROM incidents WHERE app_name = ? AND incident_end IS NULL ORDER BY incident_start DESC LIMIT 1',
+        'SELECT id, app_name, incident_start, incident_end, duration_min, reason, root_cause FROM incidents WHERE app_name = ? AND incident_end IS NULL ORDER BY incident_start DESC LIMIT 1',
       )
       .get(appName) as IncidentRow | undefined;
     return row ?? null;
@@ -372,7 +416,7 @@ export class SqliteHistoryStore implements HistoryStore {
     const since = new Date((query.nowMs ?? this.now()) - days * 86400_000).toISOString();
     const params: unknown[] = [];
     let sql =
-      'SELECT id, app_name, incident_start, incident_end, duration_min, reason FROM incidents WHERE incident_start >= ?';
+      'SELECT id, app_name, incident_start, incident_end, duration_min, reason, root_cause FROM incidents WHERE incident_start >= ?';
     params.push(since);
     if (query.app) {
       sql += ' AND app_name = ?';
@@ -393,7 +437,7 @@ export class SqliteHistoryStore implements HistoryStore {
   getIncidentById(id: number): IncidentRow | null {
     const row = this.db
       .prepare(
-        'SELECT id, app_name, incident_start, incident_end, duration_min, reason FROM incidents WHERE id = ?',
+        'SELECT id, app_name, incident_start, incident_end, duration_min, reason, root_cause FROM incidents WHERE id = ?',
       )
       .get(id) as IncidentRow | undefined;
     return row ?? null;
@@ -577,6 +621,70 @@ export class SqliteHistoryStore implements HistoryStore {
       mtbfHours,
       mttrMinutes,
     };
+  }
+
+  /**
+   * Record a "we alerted on this integration on this date" row. Returns true
+   * if a new row was inserted, false if an existing row already existed for
+   * (integration_name, date) — used to dedupe re-fires within the same day.
+   */
+  recordIntegrationAlert(row: IntegrationAlertStateRow): boolean {
+    const result = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO integration_alert_state
+           (integration_name, date, success_rate, alerted_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(row.integration_name, row.date, row.success_rate, row.alerted_at);
+    return result.changes > 0;
+  }
+
+  hasIntegrationAlerted(integrationName: string, date: string): boolean {
+    const row = this.db
+      .prepare(
+        'SELECT 1 AS present FROM integration_alert_state WHERE integration_name = ? AND date = ?',
+      )
+      .get(integrationName, date) as { present: number } | undefined;
+    return !!row;
+  }
+
+  /**
+   * Aggregate incidents by root_cause within `days`. Null/empty root_cause
+   * rows are excluded. Returns entries sorted by count DESC.
+   */
+  topRootCauses(query: { days?: number; nowMs?: number; limit?: number }): Array<{
+    root_cause: string;
+    count: number;
+  }> {
+    const days = query.days ?? 7;
+    const limit = query.limit ?? 10;
+    const since = new Date(
+      (query.nowMs ?? this.now()) - days * 86400_000,
+    ).toISOString();
+    const rows = this.db
+      .prepare(
+        `SELECT root_cause, COUNT(*) AS cnt
+           FROM incidents
+          WHERE incident_start >= ?
+            AND root_cause IS NOT NULL
+            AND TRIM(root_cause) <> ''
+          GROUP BY root_cause
+          ORDER BY cnt DESC
+          LIMIT ?`,
+      )
+      .all(since, limit) as Array<{ root_cause: string; cnt: number }>;
+    return rows.map((r) => ({ root_cause: r.root_cause, count: r.cnt }));
+  }
+
+  /**
+   * Update the root_cause column for an incident. Returns true if the row
+   * existed and was updated, false otherwise. `rootCause=null` clears it.
+   */
+  setIncidentRootCause(incidentId: number, rootCause: string | null): boolean {
+    const result = this.db
+      .prepare('UPDATE incidents SET root_cause = ? WHERE id = ?')
+      .run(rootCause, incidentId);
+    return result.changes > 0;
   }
 
   close(): void {

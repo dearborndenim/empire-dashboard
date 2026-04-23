@@ -7,7 +7,34 @@ touched. Yellow = up but idle. Red = down. Minimal, clean, fast — a v1
 monitor that we can layer features onto (alerting, incident history,
 per-user views) as the empire grows.
 
-## Current state — 87% (2026-04-22)
+## Current state — 88% (2026-04-22)
+- Incidents v6 UI landed on `incidents-v6-ui` (merged to main after
+  rebasing onto the Phase 4 merge below):
+  * `/incidents` page renders an inline `root_cause` editor per incident
+    card — editable text input (120 char max) + save button that POSTs to
+    the existing `/api/incidents/:id/note` endpoint with an `x-admin-token`
+    pulled from sessionStorage (prompted once, cached per session). The
+    read-only view shows an italic "(set root cause)" placeholder when
+    unset.
+  * Homepage (`/`) adds a "Top root causes (7d)" widget fed by
+    `historyStore.topRootCauses({ days: 7, limit: 5 })` — top 5 rows with
+    count badges. The section is entirely omitted when the list is empty
+    (no clutter on quiet weeks). `/` route also now surfaces a
+    `/incidents` footer link.
+  * `/incidents` toolbar adds a CSV export button + 7/30/90-day date-range
+    picker (default 30) that triggers a client-side download from the
+    existing `/api/incidents/export?format=csv&days=N` endpoint via an
+    anchor-click shim (no new backend endpoints).
+  * XSS safety: all root_cause values escape through `escapeHtml` on both
+    the readonly and editor paths.
+  * New CSS tokens: `.incident__root-cause*`, `.top-root-causes*`,
+    `.incidents-toolbar`, `.incidents-export*`.
+  * +9 new tests in `tests/incidentsV6.test.ts`: editor pre-fill w/ current
+    value, empty-state placeholder, XSS escaping, round-trip POST to note
+    endpoint, top-root-causes rendering (5 rows + badges), widget omitted
+    when empty, end-to-end fetch from the history store on `/`, CSV export
+    toolbar options + client JS URL construction, `/api/incidents/export`
+    respects the `days=30` default from the picker.
 - Integration observability Phase 4 landed on `phase-4-integration-obs`:
   * Per-hour cooldown on top of the existing per-day dedupe. New
     `last_fired_at` column on `integration_alert_state` (PRAGMA-gated ALTER

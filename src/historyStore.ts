@@ -102,6 +102,13 @@ export interface IntegrationAlertStateRow {
   /** The success rate (0..1) that triggered the alert. */
   success_rate: number;
   alerted_at: string;
+  /**
+   * Phase 4 integration observability: exact ISO timestamp of the most recent
+   * alert fire. Used for the per-hour cooldown check (independent of the
+   * per-day dedupe). When omitted, `recordIntegrationAlert` falls back to
+   * `alerted_at`.
+   */
+  last_fired_at?: string | null;
 }
 
 export interface IncidentStatsQuery {
@@ -151,6 +158,22 @@ export interface HistoryStore {
   recordIntegrationAlert(row: IntegrationAlertStateRow): boolean;
   /** True when an integration has already alerted on `date` (YYYY-MM-DD). */
   hasIntegrationAlerted(integrationName: string, date: string): boolean;
+  /**
+   * Return the most recent `last_fired_at` ISO timestamp across all rows for
+   * `integrationName`, or null if we have never alerted. Used for the Phase 4
+   * per-hour cooldown, independent of the per-day dedupe.
+   */
+  getMostRecentIntegrationAlert(integrationName: string): string | null;
+  /**
+   * Overwrite `last_fired_at` on an existing (integration, date) row without
+   * breaking the PK-level dedupe. Returns true when a row was updated, false
+   * when no row existed yet.
+   */
+  touchIntegrationAlert(
+    integrationName: string,
+    date: string,
+    firedAtIso: string,
+  ): boolean;
   /** Aggregate counts of incidents grouped by root_cause in a window. */
   topRootCauses(query: { days?: number; nowMs?: number; limit?: number }): Array<{
     root_cause: string;
@@ -246,6 +269,19 @@ export class SqliteHistoryStore implements HistoryStore {
       .all() as Array<{ name: string }>;
     if (!incidentColumns.some((c) => c.name === 'root_cause')) {
       this.db.exec('ALTER TABLE incidents ADD COLUMN root_cause TEXT');
+    }
+
+    // Phase 4 integration observability: add `last_fired_at` column to
+    // `integration_alert_state` for the per-hour cooldown check. Back-fill
+    // legacy rows from `alerted_at` so the cooldown respects prior fires.
+    const alertStateColumns = this.db
+      .prepare("PRAGMA table_info('integration_alert_state')")
+      .all() as Array<{ name: string }>;
+    if (!alertStateColumns.some((c) => c.name === 'last_fired_at')) {
+      this.db.exec('ALTER TABLE integration_alert_state ADD COLUMN last_fired_at TEXT');
+      this.db.exec(
+        'UPDATE integration_alert_state SET last_fired_at = alerted_at WHERE last_fired_at IS NULL',
+      );
     }
   }
 
@@ -627,15 +663,25 @@ export class SqliteHistoryStore implements HistoryStore {
    * Record a "we alerted on this integration on this date" row. Returns true
    * if a new row was inserted, false if an existing row already existed for
    * (integration_name, date) — used to dedupe re-fires within the same day.
+   *
+   * `last_fired_at` is populated from the row's `last_fired_at` field when
+   * provided, else falls back to `alerted_at` for back-compat.
    */
   recordIntegrationAlert(row: IntegrationAlertStateRow): boolean {
+    const lastFiredAt = row.last_fired_at ?? row.alerted_at;
     const result = this.db
       .prepare(
         `INSERT OR IGNORE INTO integration_alert_state
-           (integration_name, date, success_rate, alerted_at)
-         VALUES (?, ?, ?, ?)`,
+           (integration_name, date, success_rate, alerted_at, last_fired_at)
+         VALUES (?, ?, ?, ?, ?)`,
       )
-      .run(row.integration_name, row.date, row.success_rate, row.alerted_at);
+      .run(
+        row.integration_name,
+        row.date,
+        row.success_rate,
+        row.alerted_at,
+        lastFiredAt,
+      );
     return result.changes > 0;
   }
 
@@ -646,6 +692,43 @@ export class SqliteHistoryStore implements HistoryStore {
       )
       .get(integrationName, date) as { present: number } | undefined;
     return !!row;
+  }
+
+  /**
+   * Most-recent `last_fired_at` across all dates for `integrationName`. This
+   * is what the per-hour cooldown consults. Returns null if the integration
+   * has never alerted.
+   */
+  getMostRecentIntegrationAlert(integrationName: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT last_fired_at
+           FROM integration_alert_state
+          WHERE integration_name = ?
+            AND last_fired_at IS NOT NULL
+          ORDER BY last_fired_at DESC
+          LIMIT 1`,
+      )
+      .get(integrationName) as { last_fired_at: string | null } | undefined;
+    if (!row || !row.last_fired_at) return null;
+    return row.last_fired_at;
+  }
+
+  /**
+   * Update `last_fired_at` on an existing (integration, date) row without
+   * changing the primary-key-level dedupe. Returns true when the row existed.
+   */
+  touchIntegrationAlert(
+    integrationName: string,
+    date: string,
+    firedAtIso: string,
+  ): boolean {
+    const result = this.db
+      .prepare(
+        'UPDATE integration_alert_state SET last_fired_at = ? WHERE integration_name = ? AND date = ?',
+      )
+      .run(firedAtIso, integrationName, date);
+    return result.changes > 0;
   }
 
   /**

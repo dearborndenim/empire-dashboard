@@ -184,6 +184,8 @@ describe('collectStatuses with history', () => {
       computeIncidentStats: jest.fn(() => ({ incidentCount: 0, totalDowntimeMin: 0, mtbfHours: null, mttrMinutes: null })),
       recordIntegrationAlert: jest.fn(() => true),
       hasIntegrationAlerted: jest.fn(() => false),
+      getMostRecentIntegrationAlert: jest.fn(() => null),
+      touchIntegrationAlert: jest.fn(() => false),
       topRootCauses: jest.fn(() => []),
       setIncidentRootCause: jest.fn(() => false),
       close: jest.fn(),

@@ -119,6 +119,8 @@ describe('GET /api/incidents/stats', () => {
       computeIncidentStats: jest.fn(() => { throw new Error('db boom'); }),
       recordIntegrationAlert: jest.fn(() => true),
       hasIntegrationAlerted: jest.fn(() => false),
+      getMostRecentIntegrationAlert: jest.fn(() => null),
+      touchIntegrationAlert: jest.fn(() => false),
       topRootCauses: jest.fn(() => []),
       setIncidentRootCause: jest.fn(() => false),
       close: jest.fn(),

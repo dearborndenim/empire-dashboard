@@ -7,7 +7,44 @@ touched. Yellow = up but idle. Red = down. Minimal, clean, fast — a v1
 monitor that we can layer features onto (alerting, incident history,
 per-user views) as the empire grows.
 
-## Current state — 85% (2026-04-21)
+## Current state — 87% (2026-04-22)
+- Integration observability Phase 4 landed on `phase-4-integration-obs`:
+  * Per-hour cooldown on top of the existing per-day dedupe. New
+    `last_fired_at` column on `integration_alert_state` (PRAGMA-gated ALTER
+    TABLE + back-fill from `alerted_at` for legacy rows). Cooldown default
+    3600000 ms, configurable via `IntegrationAlertMonitorOptions.cooldownMs`.
+    Per-day dedupe evaluated first (preserves legacy skip reason); cooldown
+    kicks in across UTC-day boundaries so a re-fire at 00:15 after a 23:50
+    fire is still blocked.
+  * Same-day re-check now calls `touchIntegrationAlert` to slide the
+    `last_fired_at` stamp forward so subsequent polls inside the hour keep
+    the cooldown honest.
+  * Recovery signal (>= `recoveryThreshold`, default 0.9): when the
+    traffic-weighted 7d success rate climbs back above recovery threshold AND
+    an open synthetic incident exists under `integration:<name>`, monitor
+    posts a `severity: info` Teams/Console recovery message via the shared
+    `AlertSender` and auto-closes the incident via `closeIncident`. Closing
+    the incident guarantees exactly-once-per-transition semantics (subsequent
+    polls find no open incident, recovery path no-ops). Recovery survives a
+    sender throw — incident is still closed.
+  * `IntegrationAlertResult` now carries a `recovered[]` array alongside
+    `fired[]` + `skipped[]`.
+  * New `HistoryStore` methods: `getMostRecentIntegrationAlert(name)` and
+    `touchIntegrationAlert(name, date, firedAtIso)`. `recordIntegrationAlert`
+    accepts an optional `last_fired_at` (defaults to `alerted_at`). Mock
+    stores in all app/incidents/coverage tests updated.
+  * +10 new tests in `tests/integrationAlertMonitor.phase4.test.ts`:
+    cooldown-blocks-second-alert across day boundary, cooldown expires after
+    >1h, last_fired_at persists across monitor restarts, same-day re-check
+    slides the cooldown, recovery fires exactly once, recovery no-op when
+    never degraded, recovery closes synthetic incident, recovery no-op in
+    the threshold↔recovery gap, recovery closes incident even if sender
+    throws, historyStore migration + touch round-trip.
+- 381 tests passing (up from 371, +10), 96.83% statement / 88.18% branch /
+  97.63% line coverage. All pre-existing tests untouched behavior-wise —
+  the per-day dedupe skip reason `already alerted today` is preserved.
+
+## Prior state — 85% (2026-04-21)
 - Integration alerts + incidents v5 landed:
   * `AlertSender` interface with `TeamsAlertSender` (MessageCard schema, 5xx/
     network retryable signaling), `ConsoleAlertSender` fallback, `NullAlertSender`
@@ -139,6 +176,45 @@ dearborn-ai-agents, DDA-CS-Manager, diamond-pickaxe-returns-processor.
 _(none yet — newly built)_
 
 ## Build history
+### 2026-04-22 — integration observability Phase 4 (hourly cooldown + recovery)
+- Feature branch `phase-4-integration-obs`, merged to `main` via fast-forward
+- `historyStore.ts`: added `last_fired_at` column on `integration_alert_state`
+  via PRAGMA-gated ALTER TABLE + one-shot back-fill from `alerted_at`. New
+  `getMostRecentIntegrationAlert(name)` and `touchIntegrationAlert(name,
+  date, firedAtIso)` methods. `recordIntegrationAlert` gained an optional
+  `last_fired_at` on the row shape (defaults to `alerted_at`). `HistoryStore`
+  interface updated; in-memory mock stores across
+  `app.test.ts` / `app.incidents.test.ts` / `app.incidentStats.test.ts` /
+  `coverage.test.ts` all updated with the two new methods.
+- `integrationAlertMonitor.ts`:
+  * New options: `cooldownMs` (default 3600000), `recoveryThreshold`
+    (default 0.9).
+  * Per-day dedupe evaluated first (preserves existing skip reason). Then
+    per-hour cooldown consulting `getMostRecentIntegrationAlert`. Cooldown
+    blocks re-fires that cross the UTC-day boundary within the hour (which
+    the per-day dedupe alone would let through).
+  * Same-day re-check now calls `touchIntegrationAlert` to keep the
+    `last_fired_at` stamp current, so the cooldown window slides forward
+    as long as the integration remains degraded.
+  * Recovery path: when rate >= `recoveryThreshold` AND an open synthetic
+    `integration:<name>` incident exists, post an `info`-severity recovery
+    message via `AlertSender` and call `closeIncident`. Closing the incident
+    guarantees exactly-once-per-transition (next poll finds no open incident,
+    recovery no-ops). Tolerates a throwing sender — incident still closes.
+  * New `IntegrationAlertResult.recovered[]` array.
+- Tests: +10 in `tests/integrationAlertMonitor.phase4.test.ts`.
+  * Hourly cooldown: blocks-on-day-boundary, expires after >1h,
+    persists across monitor restarts, same-day touch slides the stamp.
+  * Recovery: fires once per transition, no-op when never degraded, closes
+    incident, no-op in the threshold↔recovery gap, incident close survives
+    sender throw.
+  * HistoryStore migration: column add + back-fill, `touchIntegrationAlert`
+    round-trip, no-op on unknown integration, null for never-alerted.
+- Totals: 371 → 381 tests (+10), 96.83% stmt / 88.18% branch / 97.63% line
+  coverage (thresholds 80/70/80/80 — comfortably passing).
+- AlertSender contract (`AlertPayload`/`SendResult`) unchanged. No duplicated
+  breaking changes.
+
 ### 2026-04-21 — integration alerts + incidents v5
 - Feature branch `feat/integration-alerts-and-incidents-v5`, merged to `main`
 - `alertSender.ts` (new): `AlertSender` interface, `AlertMessage`,

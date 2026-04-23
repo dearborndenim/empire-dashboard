@@ -445,6 +445,7 @@ export function createApp(deps: AppDeps): Express {
     try {
       const statuses = await collectStatuses(deps);
       let recentIncidents: ReturnType<typeof serializeIncidents> = [];
+      let topRootCauses: Array<{ root_cause: string; count: number }> = [];
       if (deps.historyStore) {
         try {
           recentIncidents = serializeIncidents(
@@ -457,6 +458,12 @@ export function createApp(deps: AppDeps): Express {
         } catch (err) {
           // eslint-disable-next-line no-console
           console.error('[empire-dashboard] incident read failed:', err);
+        }
+        try {
+          topRootCauses = deps.historyStore.topRootCauses({ days: 7, limit: 5 });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error('[empire-dashboard] topRootCauses read failed:', err);
         }
       }
       let integrationTiles: IntegrationTile[] | undefined;
@@ -495,6 +502,7 @@ export function createApp(deps: AppDeps): Express {
         recentIncidents,
         integrationTiles,
         latestPruneRun,
+        topRootCauses,
       });
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(html);

@@ -119,6 +119,12 @@ export interface SerializedIncident {
   reason: string | null;
   rootCause: string | null;
   open: boolean;
+  /**
+   * Alert throttling polish (2026-04-23): true when the row was closed by
+   * the IntegrationAlertMonitor recovery path. Surfaced through both the
+   * /api/incidents JSON and the /incidents recovered-integrations callout.
+   */
+  autoResolved: boolean;
   notes?: SerializedIncidentNote[];
 }
 
@@ -133,6 +139,7 @@ export function serializeIncidents(rows: IncidentRow[]): SerializedIncident[] {
       reason: r.reason,
       rootCause: r.root_cause ?? null,
       open: r.incident_end === null,
+      autoResolved: r.auto_resolved === 1,
     };
     if (Array.isArray(r.notes)) {
       out.notes = r.notes.map((n) => ({ at: n.at, note: n.note }));
@@ -316,17 +323,62 @@ export function createApp(deps: AppDeps): Express {
         }
       }
       const appName = typeof req.query.app === 'string' ? req.query.app : undefined;
+      // Alert throttling polish (2026-04-23): allow the recovered-integrations
+      // banner click-through to filter to only auto-resolved incidents.
+      const autoResolvedOnly =
+        typeof req.query.auto_resolved === 'string'
+          ? req.query.auto_resolved === 'true' || req.query.auto_resolved === '1'
+          : false;
       const rows = deps.historyStore.listIncidents({
         days,
         app: appName,
         includeNotes: true,
+        autoResolvedOnly,
       });
       const incidents = serializeIncidents(rows);
       res.json({
         generatedAt: new Date().toISOString(),
         windowDays: days,
         count: incidents.length,
+        autoResolvedOnly,
         incidents,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  app.get('/api/alerts/recent', (req, res) => {
+    try {
+      if (!deps.historyStore) {
+        res.status(503).json({ error: 'history store unavailable' });
+        return;
+      }
+      const limitRaw = req.query.limit;
+      let limit = 50;
+      if (typeof limitRaw === 'string') {
+        const parsed = Number(limitRaw);
+        if (Number.isFinite(parsed)) {
+          limit = Math.max(1, Math.min(500, Math.floor(parsed)));
+        }
+      }
+      const rows = deps.historyStore.listAlertAudits({ limit });
+      const alerts = rows.map((r) => ({
+        id: r.id,
+        at: r.at,
+        integration: r.integration_name,
+        outcome: r.outcome,
+        reason: r.reason,
+        severity: r.severity,
+        successRate: r.success_rate,
+      }));
+      res.json({
+        generatedAt: new Date().toISOString(),
+        limit,
+        count: alerts.length,
+        alerts,
       });
     } catch (err) {
       res.status(500).json({
@@ -401,7 +453,7 @@ export function createApp(deps: AppDeps): Express {
     }
   });
 
-  app.get('/incidents', (_req, res) => {
+  app.get('/incidents', (req, res) => {
     try {
       const appStats: Array<{
         app: string;
@@ -411,6 +463,14 @@ export function createApp(deps: AppDeps): Express {
         totalDowntimeMin: number;
       }> = [];
       let recent: ReturnType<typeof serializeIncidents> = [];
+      let recoveredCount24h = 0;
+      // Alert throttling polish (2026-04-23): when ?auto_resolved=true is on
+      // the URL, filter the recent list down to only auto-closed rows so the
+      // banner click-through reads cleanly.
+      const filterAutoResolved =
+        typeof req.query.auto_resolved === 'string'
+          ? req.query.auto_resolved === 'true' || req.query.auto_resolved === '1'
+          : false;
       if (deps.historyStore) {
         for (const a of deps.config.apps) {
           const s = deps.historyStore.computeIncidentStats({ app: a.name, days: 7 });
@@ -423,8 +483,25 @@ export function createApp(deps: AppDeps): Express {
           });
         }
         recent = serializeIncidents(
-          deps.historyStore.listIncidents({ days: 7, limit: 50, includeNotes: true }),
+          deps.historyStore.listIncidents({
+            days: 7,
+            limit: 50,
+            includeNotes: true,
+            autoResolvedOnly: filterAutoResolved,
+          }),
         );
+        // Count auto-resolved incidents in the last 24h for the banner.
+        try {
+          const recoveredRows = deps.historyStore.listIncidents({
+            days: 1,
+            limit: 500,
+            autoResolvedOnly: true,
+          });
+          recoveredCount24h = recoveredRows.length;
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error('[empire-dashboard] recovered-count read failed:', err);
+        }
       }
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(
@@ -432,6 +509,8 @@ export function createApp(deps: AppDeps): Express {
           generatedAt: new Date().toISOString(),
           appStats,
           recentIncidents: recent,
+          recoveredCount24h,
+          autoResolvedFilterActive: filterAutoResolved,
         }),
       );
     } catch (err) {

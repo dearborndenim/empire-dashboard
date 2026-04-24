@@ -26,6 +26,7 @@ function buildDeps() {
     historyDbPath: ':memory:',
     historyRetentionDays: 7,
     incidentsRetentionDays: 30,
+    integrationAlertCooldownSeconds: 3600,
     apps: [
       { name: 'Alpha', repo: 'o/alpha', url: 'https://alpha' },
       { name: 'Beta', repo: 'o/beta', url: 'https://beta' },

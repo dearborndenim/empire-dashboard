@@ -17,6 +17,7 @@ function buildDeps(
     historyDbPath: ':memory:',
     historyRetentionDays: 7,
     incidentsRetentionDays: 30,
+    integrationAlertCooldownSeconds: 3600,
     apps: [
       { name: 'Alpha', repo: 'o/alpha', url: 'https://alpha', railwayLogsUrl: 'https://rail/alpha' },
       { name: 'Beta', repo: 'o/beta', url: 'https://beta' },
@@ -188,6 +189,10 @@ describe('collectStatuses with history', () => {
       touchIntegrationAlert: jest.fn(() => false),
       topRootCauses: jest.fn(() => []),
       setIncidentRootCause: jest.fn(() => false),
+      setIntegrationCooldownOverride: jest.fn(),
+      getIntegrationCooldownOverride: jest.fn(() => null),
+      recordAlertAudit: jest.fn(() => 1),
+      listAlertAudits: jest.fn(() => []),
       close: jest.fn(),
     };
     const enriched = { ...deps, historyStore: throwingStore };

@@ -14,6 +14,19 @@
  * and let the underlying app's monitor card communicate the truth.
  */
 
+/**
+ * Scene-drift v2 (2026-04-23): per-classification badge counts rendered
+ * above the tile body. `chronic` = red, `spike` = yellow, `stable` = green.
+ * Field is undefined for tiles that don't surface flag classifications.
+ */
+export interface FlagClassificationCounts {
+  chronic: number;
+  spike: number;
+  stable: number;
+}
+
+export type FlagClassification = 'chronic' | 'spike' | 'stable';
+
 export interface IntegrationTile {
   id: string;
   title: string;
@@ -25,11 +38,27 @@ export interface IntegrationTile {
    */
   summary: string;
   /** Optional structured key/value pairs the UI can render as a mini table. */
-  details?: Array<{ label: string; value: string }>;
+  details?: Array<{
+    label: string;
+    value: string;
+    /**
+     * Scene-drift v2: per-detail flag_classification (chronic/spike/stable)
+     * so the renderer can colorize the row's status pill. Undefined for
+     * legacy tiles or rows without classification data.
+     */
+    classification?: FlagClassification;
+  }>;
   /** If the tile is "error" we may have a short reason for Railway logs. */
   error?: string;
   /** Historical daily success-rate points (ascending date) used for a sparkline. */
   sparkline?: IntegrationSparklinePoint[];
+  /**
+   * Scene-drift v2 (2026-04-23): counts per flag classification across the
+   * full payload (not just the top-3 in details). Rendered as colored badges
+   * above the tile body. Undefined when the upstream payload omits
+   * flag_classification entirely (legacy fallback path).
+   */
+  classificationCounts?: FlagClassificationCounts;
 }
 
 export interface IntegrationFetchImpl {
@@ -359,6 +388,11 @@ async function fetchSceneDriftTile(
       .map((s) => parseDriftScene(s))
       .filter((s): s is SceneDriftScene => s !== null);
 
+    // Scene-drift v2: classification counts across the full payload (not just
+    // the top-3). Only emitted when at least one scene carries a non-null
+    // classification — keeps the legacy fallback path clean.
+    const classificationCounts = computeClassificationCounts(flagged);
+
     // Over-represented scenes are z > 0. Sort by severity (weighted).
     const overRepresented = flagged
       .filter((s) => s.zScore > 0)
@@ -378,26 +412,38 @@ async function fetchSceneDriftTile(
             : `${Math.round(s.daysSinceLastFlag)}d ago`,
         );
       }
-      details.push({ label: s.scene, value: bits.join(' · ') });
+      const detail: NonNullable<IntegrationTile['details']>[number] = {
+        label: s.scene,
+        value: bits.join(' · '),
+      };
+      if (s.flagClassification) {
+        detail.classification = s.flagClassification;
+      }
+      details.push(detail);
     }
 
-    // State: ok if nothing flagged, warn if any flagged, error-ish if any
-    // repeat offender within 2 days and z > 2.
+    // State: ok if nothing flagged, warn if any flagged. Scene-drift v2:
+    // promote to warn when ANY scene is chronic, even if not in top-3.
     let state: IntegrationTile['state'] = 'ok';
     if (top.length > 0) state = 'warn';
+    if (classificationCounts && classificationCounts.chronic > 0) state = 'warn';
 
     const summary =
       top.length === 0
         ? 'All scenes balanced'
         : `${top.length} over-represented`;
 
-    return {
+    const tile: IntegrationTile = {
       id: 'scene-drift',
       title: 'Scene Distribution Drift',
       state,
       summary,
       details,
     };
+    if (classificationCounts) {
+      tile.classificationCounts = classificationCounts;
+    }
+    return tile;
   } catch (err) {
     return errorTile(
       'scene-drift',
@@ -413,6 +459,13 @@ interface SceneDriftScene {
   count: number | null;
   expected: number | null;
   daysSinceLastFlag: number | null;
+  /**
+   * Scene-drift v2 (2026-04-23): per-scene flag classification from the
+   * Content Engine payload. `null`/undefined when the upstream omits the
+   * field (graceful legacy fallback). Optional for back-compat with v1
+   * callers that constructed scenes without this field.
+   */
+  flagClassification?: FlagClassification | null;
 }
 
 function parseDriftScene(raw: Record<string, unknown>): SceneDriftScene | null {
@@ -426,7 +479,38 @@ function parseDriftScene(raw: Record<string, unknown>): SceneDriftScene | null {
     'days_since_last_flag',
     'daysSinceLastFlag',
   ]);
-  return { scene, zScore, count, expected, daysSinceLastFlag };
+  const rawCls = raw.flag_classification ?? raw.flagClassification;
+  let flagClassification: FlagClassification | null = null;
+  if (rawCls === 'chronic' || rawCls === 'spike' || rawCls === 'stable') {
+    flagClassification = rawCls;
+  }
+  return {
+    scene,
+    zScore,
+    count,
+    expected,
+    daysSinceLastFlag,
+    flagClassification,
+  };
+}
+
+/**
+ * Scene-drift v2 (2026-04-23): tally per-classification counts across the
+ * full scenes payload. Returns undefined when NO scene carries a
+ * classification (legacy fallback path — preserves the v1 render).
+ */
+export function computeClassificationCounts(
+  scenes: SceneDriftScene[],
+): FlagClassificationCounts | undefined {
+  const counts: FlagClassificationCounts = { chronic: 0, spike: 0, stable: 0 };
+  let any = false;
+  for (const s of scenes) {
+    const cls = s.flagClassification;
+    if (cls !== 'chronic' && cls !== 'spike' && cls !== 'stable') continue;
+    any = true;
+    counts[cls] += 1;
+  }
+  return any ? counts : undefined;
 }
 
 /**

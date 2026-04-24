@@ -231,6 +231,7 @@ async function main(): Promise<void> {
     const monitor = new IntegrationAlertMonitor({
       store: historyStore,
       alertSender: alertSelection.sender,
+      cooldownMs: config.integrationAlertCooldownSeconds * 1000,
     });
     integrationAlertJob = startDailyJob({
       name: 'integration-alert-check',

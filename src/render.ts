@@ -187,6 +187,37 @@ function renderTileSparkline(
   return `<div class="tile__spark" role="img" aria-label="7 day success-rate sparkline">${bars}</div>`;
 }
 
+/**
+ * Scene-drift v2 (2026-04-23): per-classification badge counts rendered
+ * above the tile body. chronic = red, spike = yellow, stable = green. The
+ * row is omitted when the tile has no classificationCounts (legacy /
+ * non-classified payloads).
+ */
+function renderClassificationBadges(
+  counts: IntegrationTile['classificationCounts'],
+): string {
+  if (!counts) return '';
+  const items: string[] = [];
+  // Render in severity order so the eye picks up chronic first.
+  if (counts.chronic > 0) {
+    items.push(
+      `<span class="tile__badge tile__badge--chronic" title="Chronic flags (z &gt; threshold AND recently flagged)">${counts.chronic} chronic</span>`,
+    );
+  }
+  if (counts.spike > 0) {
+    items.push(
+      `<span class="tile__badge tile__badge--spike" title="Spike flags (z &gt; threshold AND not recently flagged)">${counts.spike} spike</span>`,
+    );
+  }
+  if (counts.stable > 0) {
+    items.push(
+      `<span class="tile__badge tile__badge--stable" title="Stable scenes (z within tolerance)">${counts.stable} stable</span>`,
+    );
+  }
+  if (items.length === 0) return '';
+  return `<div class="tile__badges" aria-label="flag classification counts">${items.join('')}</div>`;
+}
+
 function renderIntegrationTiles(tiles: IntegrationTile[] | undefined): string {
   if (!tiles || tiles.length === 0) return '';
   const cards = tiles
@@ -196,7 +227,12 @@ function renderIntegrationTiles(tiles: IntegrationTile[] | undefined): string {
       const stateClass = `tile tile--${tile.state}`;
       const details = (tile.details ?? [])
         .map((d) => {
-          return `<li class="tile__detail"><span class="tile__detail-label">${escapeHtml(d.label)}</span> <span class="tile__detail-value">${escapeHtml(d.value)}</span></li>`;
+          // Scene-drift v2: optional per-row classification pill.
+          const cls = d.classification;
+          const clsBadge = cls
+            ? ` <span class="tile__detail-badge tile__detail-badge--${cls}" title="${escapeHtml(cls)}">${escapeHtml(cls)}</span>`
+            : '';
+          return `<li class="tile__detail"><span class="tile__detail-label">${escapeHtml(d.label)}</span> <span class="tile__detail-value">${escapeHtml(d.value)}</span>${clsBadge}</li>`;
         })
         .join('');
       const detailsBlock = details
@@ -206,9 +242,11 @@ function renderIntegrationTiles(tiles: IntegrationTile[] | undefined): string {
         ? `<div class="tile__error">${escapeHtml(tile.error)}</div>`
         : '';
       const sparkBlock = renderTileSparkline(tile.sparkline);
+      const badgesBlock = renderClassificationBadges(tile.classificationCounts);
       return `<div class="${stateClass}">
         <div class="tile__title">${title}</div>
         <div class="tile__summary">${summary}</div>
+        ${badgesBlock}
         ${detailsBlock}
         ${sparkBlock}
         ${errorBlock}
@@ -251,6 +289,19 @@ export interface RenderIncidentsPageOptions {
   recentIncidents: RenderIncident[];
   /** Incidents v6: admin token is not exposed; the client JS prompts for it. */
   adminTokenRequired?: boolean;
+  /**
+   * Alert throttling polish (2026-04-23): count of integrations that
+   * auto-resolved via the recovery signal in the last 24h. When > 0 the page
+   * renders a callout banner with a click-through to the auto_resolved=true
+   * filter. Undefined/0 hides the banner.
+   */
+  recoveredCount24h?: number;
+  /**
+   * True when the current page render is already filtered by
+   * auto_resolved=true (banner click-through). Used to render a "showing
+   * recovered only · clear filter" affordance instead of the banner itself.
+   */
+  autoResolvedFilterActive?: boolean;
 }
 
 export function formatMtbfHours(value: number | null): string {
@@ -268,6 +319,23 @@ export function formatMttrMinutes(value: number | null): string {
   const hours = Math.floor(value / 60);
   const mins = Math.round(value % 60);
   return mins === 0 ? `${hours}h` : `${hours}h${mins}m`;
+}
+
+function renderRecoveredBanner(opts: RenderIncidentsPageOptions): string {
+  if (opts.autoResolvedFilterActive) {
+    return `<div class="recovered-banner recovered-banner--active" role="status">
+      Showing auto-resolved (recovered) integrations only.
+      <a class="recovered-banner__clear" href="/incidents">Clear filter</a>
+    </div>`;
+  }
+  const n = opts.recoveredCount24h ?? 0;
+  if (!n || n <= 0) return '';
+  const noun = n === 1 ? 'integration' : 'integrations';
+  return `<div class="recovered-banner recovered-banner--info" role="status">
+    <span class="recovered-banner__icon" aria-hidden="true">↺</span>
+    <span class="recovered-banner__text">${n} ${noun} auto-resolved in the last 24h.</span>
+    <a class="recovered-banner__cta" href="/incidents?auto_resolved=true">View recovered</a>
+  </div>`;
 }
 
 function renderIncidentsToolbar(): string {
@@ -366,6 +434,7 @@ export function renderIncidentsPage(opts: RenderIncidentsPageOptions): string {
 ${cards}
       </div>
     </section>
+    ${renderRecoveredBanner(opts)}
     ${renderIncidentsToolbar()}
     ${renderIncidentsPanel(opts.recentIncidents, { editable: true })}
     <footer class="foot">

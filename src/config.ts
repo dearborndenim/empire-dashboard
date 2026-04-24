@@ -96,6 +96,12 @@ export interface RuntimeConfig {
   historyRetentionDays: number;
   incidentsRetentionDays: number;
   incidentsAdminToken?: string;
+  /**
+   * Alert throttling polish (2026-04-23): default cooldown between alert
+   * fires for the same integration. Per-key SQLite override (set via the
+   * historyStore) wins when present. Default 3600 seconds.
+   */
+  integrationAlertCooldownSeconds: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig {
@@ -113,6 +119,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
       ? incidentsRetentionRaw
       : 30;
   const incidentsAdminToken = env.INCIDENTS_ADMIN_TOKEN || undefined;
+  const cooldownRaw = Number(env.INTEGRATION_ALERT_COOLDOWN_SECONDS ?? 3600);
+  const integrationAlertCooldownSeconds =
+    Number.isFinite(cooldownRaw) && cooldownRaw > 0 ? cooldownRaw : 3600;
 
   let apps: AppConfig[] = DEFAULT_APPS;
   if (env.APPS_CONFIG_PATH) {
@@ -139,5 +148,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
     historyRetentionDays,
     incidentsRetentionDays,
     incidentsAdminToken,
+    integrationAlertCooldownSeconds,
   };
 }

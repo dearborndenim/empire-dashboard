@@ -536,3 +536,81 @@ html, body {
   color: #fff;
   border-color: #3a4250;
 }
+
+/* Scene-drift v2 (2026-04-23): per-classification badge counts. */
+.tile__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 4px;
+}
+
+.tile__badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid #2a2e34;
+  background: #1a1d22;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.tile__badge--chronic { color: #f26d6d; border-color: #592222; }
+.tile__badge--spike { color: #f4c13a; border-color: #5a451a; }
+.tile__badge--stable { color: #42d67c; border-color: #1d4d2f; }
+
+.tile__detail-badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 6px;
+  background: #1a1d22;
+  border: 1px solid #2a2e34;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tile__detail-badge--chronic { color: #f26d6d; border-color: #592222; }
+.tile__detail-badge--spike { color: #f4c13a; border-color: #5a451a; }
+.tile__detail-badge--stable { color: #42d67c; border-color: #1d4d2f; }
+
+/* Alert throttling polish (2026-04-23): recovered-integrations banner. */
+.recovered-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 16px 0 0;
+  padding: 10px 14px;
+  background: #11251a;
+  border: 1px solid #1d4d2f;
+  color: #b6e6c2;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.recovered-banner--active {
+  background: #14171c;
+  border-color: #2a2e34;
+  color: #c5c8cd;
+}
+
+.recovered-banner__icon {
+  font-size: 16px;
+  color: #42d67c;
+}
+
+.recovered-banner__cta,
+.recovered-banner__clear {
+  margin-left: auto;
+  color: #8df0b0;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.recovered-banner__cta:hover,
+.recovered-banner__clear:hover {
+  text-decoration: underline;
+}

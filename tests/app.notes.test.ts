@@ -15,6 +15,7 @@ function buildDeps() {
     historyDbPath: ':memory:',
     historyRetentionDays: 7,
     incidentsRetentionDays: 30,
+    integrationAlertCooldownSeconds: 3600,
     apps: [{ name: 'Alpha', repo: 'o/alpha', url: 'https://alpha' }],
   };
   const fetchImpl: FetchLike = async () => ({ ok: true, status: 200 });

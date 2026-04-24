@@ -274,6 +274,7 @@ describe('app.ts — additional error paths', () => {
       historyDbPath: ':memory:',
       historyRetentionDays: 7,
       incidentsRetentionDays: 30,
+      integrationAlertCooldownSeconds: 3600,
       apps: [{ name: 'A', repo: 'o/a' }],
     };
     return { config, healthChecker, activityTracker };
@@ -305,6 +306,10 @@ describe('app.ts — additional error paths', () => {
       touchIntegrationAlert: jest.fn(() => false),
       topRootCauses: jest.fn(() => []),
       setIncidentRootCause: jest.fn(() => false),
+      setIntegrationCooldownOverride: jest.fn(),
+      getIntegrationCooldownOverride: jest.fn(() => null),
+      recordAlertAudit: jest.fn(() => 1),
+      listAlertAudits: jest.fn(() => []),
       close: jest.fn(),
     };
     const app = createApp({ ...buildDeps(), historyStore: broken });
@@ -339,6 +344,10 @@ describe('app.ts — additional error paths', () => {
       touchIntegrationAlert: jest.fn(() => false),
       topRootCauses: jest.fn(() => []),
       setIncidentRootCause: jest.fn(() => false),
+      setIntegrationCooldownOverride: jest.fn(),
+      getIntegrationCooldownOverride: jest.fn(() => null),
+      recordAlertAudit: jest.fn(() => 1),
+      listAlertAudits: jest.fn(() => []),
       close: jest.fn(),
     };
     const app = createApp({
@@ -380,6 +389,10 @@ describe('app.ts — additional error paths', () => {
       touchIntegrationAlert: jest.fn(() => false),
       topRootCauses: jest.fn(() => []),
       setIncidentRootCause: jest.fn(() => false),
+      setIntegrationCooldownOverride: jest.fn(),
+      getIntegrationCooldownOverride: jest.fn(() => null),
+      recordAlertAudit: jest.fn(() => 1),
+      listAlertAudits: jest.fn(() => []),
       close: jest.fn(),
     };
     const app = createApp({ ...buildDeps(), historyStore: broken });
@@ -440,6 +453,10 @@ describe('app.ts — additional error paths', () => {
       touchIntegrationAlert: jest.fn(() => false),
       topRootCauses: jest.fn(() => []),
       setIncidentRootCause: jest.fn(() => false),
+      setIntegrationCooldownOverride: jest.fn(),
+      getIntegrationCooldownOverride: jest.fn(() => null),
+      recordAlertAudit: jest.fn(() => 1),
+      listAlertAudits: jest.fn(() => []),
       close: jest.fn(),
     };
     const app = createApp({ ...buildDeps(), historyStore: weirdStore });

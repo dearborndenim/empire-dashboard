@@ -159,23 +159,39 @@ export class IntegrationAlertMonitor {
         // Refresh the cooldown stamp so subsequent polls inside the hour still
         // see the most recent would-have-fired timestamp.
         this.safeTouchAlert(integration, today, new Date(nowMs).toISOString());
+        this.safeRecordAudit({
+          at: new Date(nowMs).toISOString(),
+          integration_name: integration,
+          outcome: 'suppressed',
+          reason: 'already alerted today',
+          severity: null,
+          success_rate: rate,
+        });
         result.skipped.push({ integration, reason: 'already alerted today' });
         continue;
       }
 
       // Per-hour cooldown check (Phase 4) — blocks a re-fire even across UTC
-      // day boundaries (e.g. 23:30 yesterday, 00:15 today).
+      // day boundaries (e.g. 23:30 yesterday, 00:15 today). Per-key override
+      // (alert throttling polish 2026-04-23) wins over the env default.
+      const cooldownMsForKey = this.resolveCooldownMs(integration);
       const lastFiredAtIso = this.safeGetMostRecentAlertTs(integration);
       if (lastFiredAtIso) {
         const lastFiredMs = Date.parse(lastFiredAtIso);
-        if (Number.isFinite(lastFiredMs) && nowMs - lastFiredMs < this.cooldownMs) {
+        if (Number.isFinite(lastFiredMs) && nowMs - lastFiredMs < cooldownMsForKey) {
           const minsLeft = Math.ceil(
-            (this.cooldownMs - (nowMs - lastFiredMs)) / 60000,
+            (cooldownMsForKey - (nowMs - lastFiredMs)) / 60000,
           );
-          result.skipped.push({
-            integration,
-            reason: `cooldown (fires again in ~${minsLeft}m)`,
+          const reason = `cooldown (fires again in ~${minsLeft}m)`;
+          this.safeRecordAudit({
+            at: new Date(nowMs).toISOString(),
+            integration_name: integration,
+            outcome: 'suppressed',
+            reason,
+            severity: null,
+            success_rate: rate,
           });
+          result.skipped.push({ integration, reason });
           continue;
         }
       }
@@ -250,6 +266,15 @@ export class IntegrationAlertMonitor {
           err,
         );
       }
+
+      this.safeRecordAudit({
+        at: new Date(nowMs).toISOString(),
+        integration_name: integration,
+        outcome: 'fired',
+        reason: title,
+        severity,
+        success_rate: rate,
+      });
 
       result.fired.push({
         integration,
@@ -330,6 +355,7 @@ export class IntegrationAlertMonitor {
       const closed = this.store.closeIncident(
         incidentApp,
         new Date(nowMs).toISOString(),
+        { autoResolved: true },
       );
       closedIncidentId = closed?.id ?? openIncident.id;
     } catch (err) {
@@ -340,6 +366,15 @@ export class IntegrationAlertMonitor {
       closedIncidentId = openIncident.id;
     }
 
+    this.safeRecordAudit({
+      at: new Date(nowMs).toISOString(),
+      integration_name: integration,
+      outcome: 'fired',
+      reason: title,
+      severity: 'info',
+      success_rate: rate,
+    });
+
     return {
       integration,
       successRate: rate,
@@ -349,6 +384,53 @@ export class IntegrationAlertMonitor {
       alertDelivered: alertResult.delivered,
       alertTransport: alertResult.transport,
     };
+  }
+
+  /**
+   * Resolve the effective cooldown for an integration. Per-key SQLite
+   * override (when set) wins over the env-driven default. Bad/zero/negative
+   * overrides fall back to the default to avoid disabling cooldown by
+   * accident.
+   */
+  private resolveCooldownMs(integration: string): number {
+    const fn = this.store.getIntegrationCooldownOverride;
+    if (typeof fn !== 'function') return this.cooldownMs;
+    try {
+      const overrideSec = this.store.getIntegrationCooldownOverride(integration);
+      if (
+        typeof overrideSec === 'number' &&
+        Number.isFinite(overrideSec) &&
+        overrideSec > 0
+      ) {
+        return overrideSec * 1000;
+      }
+    } catch (err) {
+      this.logger.error(
+        `[empire-dashboard] cooldown override read failed for ${integration}:`,
+        err,
+      );
+    }
+    return this.cooldownMs;
+  }
+
+  private safeRecordAudit(row: {
+    at: string;
+    integration_name: string;
+    outcome: 'fired' | 'suppressed';
+    reason: string;
+    severity: string | null;
+    success_rate: number | null;
+  }): void {
+    const fn = this.store.recordAlertAudit;
+    if (typeof fn !== 'function') return;
+    try {
+      this.store.recordAlertAudit(row);
+    } catch (err) {
+      this.logger.error(
+        `[empire-dashboard] alert audit write failed for ${row.integration_name}:`,
+        err,
+      );
+    }
   }
 
   private safeGetMostRecentAlertTs(integration: string): string | null {

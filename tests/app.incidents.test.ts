@@ -20,6 +20,7 @@ function buildDeps(downBeta = true): {
     historyDbPath: ':memory:',
     historyRetentionDays: 7,
     incidentsRetentionDays: 30,
+    integrationAlertCooldownSeconds: 3600,
     apps: [
       { name: 'Alpha', repo: 'o/alpha', url: 'https://alpha' },
       { name: 'Beta', repo: 'o/beta', url: 'https://beta' },
@@ -51,8 +52,8 @@ describe('serializeIncidents', () => {
       { id: 2, app_name: 'B', incident_start: 's', incident_end: 'e', duration_min: 4, reason: 'x' },
     ]);
     expect(out).toEqual([
-      { id: 1, app: 'A', start: 's', end: null, durationMin: null, reason: 'r', rootCause: null, open: true },
-      { id: 2, app: 'B', start: 's', end: 'e', durationMin: 4, reason: 'x', rootCause: null, open: false },
+      { id: 1, app: 'A', start: 's', end: null, durationMin: null, reason: 'r', rootCause: null, open: true, autoResolved: false },
+      { id: 2, app: 'B', start: 's', end: 'e', durationMin: 4, reason: 'x', rootCause: null, open: false, autoResolved: false },
     ]);
   });
 });
@@ -146,6 +147,10 @@ describe('GET /api/incidents', () => {
       touchIntegrationAlert: jest.fn(() => false),
       topRootCauses: jest.fn(() => []),
       setIncidentRootCause: jest.fn(() => false),
+      setIntegrationCooldownOverride: jest.fn(),
+      getIntegrationCooldownOverride: jest.fn(() => null),
+      recordAlertAudit: jest.fn(() => 1),
+      listAlertAudits: jest.fn(() => []),
       close: jest.fn(),
     };
     const app = createApp({ ...deps, historyStore: broken });
@@ -241,6 +246,10 @@ describe('GET / with recent incidents', () => {
       touchIntegrationAlert: jest.fn(() => false),
       topRootCauses: jest.fn(() => []),
       setIncidentRootCause: jest.fn(() => false),
+      setIntegrationCooldownOverride: jest.fn(),
+      getIntegrationCooldownOverride: jest.fn(() => null),
+      recordAlertAudit: jest.fn(() => 1),
+      listAlertAudits: jest.fn(() => []),
       close: jest.fn(),
     };
     const app = createApp({ ...deps, historyStore: broken });

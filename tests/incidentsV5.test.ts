@@ -19,6 +19,7 @@ function buildDeps() {
     historyDbPath: ':memory:',
     historyRetentionDays: 7,
     incidentsRetentionDays: 30,
+    integrationAlertCooldownSeconds: 3600,
     apps: [
       { name: 'Alpha', repo: 'o/alpha', url: 'https://alpha' },
       { name: 'Beta', repo: 'o/beta', url: 'https://beta' },
@@ -70,6 +71,7 @@ describe('serializeIncidentsCsv', () => {
         reason: 'HTTP 502',
         rootCause: 'upstream outage',
         open: false,
+        autoResolved: false,
         notes: [
           { at: '2026-04-20T10:10:00Z', note: 'restart done' },
           { at: '2026-04-20T11:00:00Z', note: 'monitoring' },

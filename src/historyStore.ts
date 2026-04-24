@@ -42,6 +42,12 @@ export interface IncidentRow {
   reason: string | null;
   /** Optional operator-tagged root cause. Added in incidents v5. */
   root_cause?: string | null;
+  /**
+   * Alert throttling polish (2026-04-23): 1 when this incident was closed by
+   * the IntegrationAlertMonitor recovery path, 0 otherwise. Surfaced through
+   * the /incidents page as the "Recovered integrations (24h)" callout.
+   */
+  auto_resolved?: number | null;
   notes?: IncidentNote[];
 }
 
@@ -63,6 +69,13 @@ export interface IncidentsQuery {
   nowMs?: number;
   /** When true, include notes joined onto each incident row. */
   includeNotes?: boolean;
+  /**
+   * When true, only return incidents whose `auto_resolved` flag is 1 (closed
+   * via the IntegrationAlertMonitor recovery path). Used by the
+   * /incidents?auto_resolved=true filter on the recovered-integrations
+   * banner.
+   */
+  autoResolvedOnly?: boolean;
 }
 
 /**
@@ -109,6 +122,42 @@ export interface IntegrationAlertStateRow {
    * `alerted_at`.
    */
   last_fired_at?: string | null;
+  /**
+   * Alert throttling polish (2026-04-23): per-key cooldown override in
+   * seconds. When non-null this overrides the env-driven default for the
+   * integration. Read via `getIntegrationCooldownOverride`.
+   */
+  cooldown_seconds?: number | null;
+}
+
+/**
+ * Alert throttling polish (2026-04-23): one row per attempted alert fire
+ * (whether it actually delivered or was suppressed). Surfaced via
+ * GET /api/alerts/recent for audit + debugging.
+ */
+export interface AlertAuditRow {
+  id: number;
+  /** ISO timestamp the attempt was logged. */
+  at: string;
+  /** Integration / alert key (e.g. "kanban", "po-receiver"). */
+  integration_name: string;
+  /** "fired" | "suppressed" — whether the alert was actually sent. */
+  outcome: 'fired' | 'suppressed';
+  /**
+   * Free-form reason. For "suppressed" rows it's the dedupe/cooldown reason
+   * (e.g. "cooldown (fires again in ~12m)"). For "fired" rows it's the alert
+   * title or summary. Capped at 500 chars at the call-site.
+   */
+  reason: string;
+  /** Severity at time of fire/suppression (info|warning|critical|unknown). */
+  severity: string | null;
+  /** Optional 0..1 success rate at the moment the audit row was written. */
+  success_rate: number | null;
+}
+
+export interface AlertAuditQuery {
+  /** Default 50, max 500 (caller enforces clamp). */
+  limit?: number;
 }
 
 export interface IncidentStatsQuery {
@@ -143,7 +192,16 @@ export interface HistoryStore {
   pruneOlderThan(days: number, nowMs?: number): number;
   pruneIncidents(retentionDays: number, nowMs?: number): number;
   openIncident(appName: string, startedAtIso: string, reason: string | null): number;
-  closeIncident(appName: string, endedAtIso: string): IncidentRow | null;
+  /**
+   * Close the most recently opened incident for `appName`. The optional
+   * `opts.autoResolved` flag (default false) marks the row as machine-closed
+   * (used by IntegrationAlertMonitor recovery).
+   */
+  closeIncident(
+    appName: string,
+    endedAtIso: string,
+    opts?: { autoResolved?: boolean },
+  ): IncidentRow | null;
   getOpenIncident(appName: string): IncidentRow | null;
   listIncidents(query?: IncidentsQuery): IncidentRow[];
   getIncidentById(id: number): IncidentRow | null;
@@ -181,6 +239,32 @@ export interface HistoryStore {
   }>;
   /** Set/overwrite the root_cause column on an incident row. */
   setIncidentRootCause(incidentId: number, rootCause: string | null): boolean;
+  /**
+   * Alert throttling polish (2026-04-23): set a per-integration cooldown
+   * override (seconds). Pass `seconds=null` to clear. Idempotent — inserts
+   * a stub row for today's date if none exists yet.
+   */
+  setIntegrationCooldownOverride(
+    integrationName: string,
+    seconds: number | null,
+  ): void;
+  /**
+   * Read the current per-integration cooldown override (seconds) or null when
+   * unset / no row. Reads the most-recent row by alerted_at; the override is
+   * not date-specific (we only need to find a non-null value for the
+   * integration).
+   */
+  getIntegrationCooldownOverride(integrationName: string): number | null;
+  /**
+   * Append an alert audit row. Returns the new row id. The reason field is
+   * truncated to 500 chars; everything else is stored verbatim.
+   */
+  recordAlertAudit(row: Omit<AlertAuditRow, 'id'>): number;
+  /**
+   * Most-recent N alert audit rows ordered by id DESC (newest first). The
+   * caller is expected to clamp `limit` to [1, 500].
+   */
+  listAlertAudits(query?: AlertAuditQuery): AlertAuditRow[];
   close(): void;
 }
 
@@ -260,6 +344,19 @@ export class SqliteHistoryStore implements HistoryStore {
         alerted_at TEXT NOT NULL,
         PRIMARY KEY (integration_name, date)
       );
+      CREATE TABLE IF NOT EXISTS alert_audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        at TEXT NOT NULL,
+        integration_name TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        severity TEXT,
+        success_rate REAL
+      );
+      CREATE INDEX IF NOT EXISTS idx_alert_audit_log_at
+        ON alert_audit_log(at);
+      CREATE INDEX IF NOT EXISTS idx_alert_audit_log_int
+        ON alert_audit_log(integration_name, at);
     `);
 
     // Incidents v5: add root_cause column if missing. sqlite lets us check
@@ -281,6 +378,21 @@ export class SqliteHistoryStore implements HistoryStore {
       this.db.exec('ALTER TABLE integration_alert_state ADD COLUMN last_fired_at TEXT');
       this.db.exec(
         'UPDATE integration_alert_state SET last_fired_at = alerted_at WHERE last_fired_at IS NULL',
+      );
+    }
+    // Alert throttling polish (2026-04-23): per-key cooldown override
+    // (seconds). Nullable — falls back to env-driven default when absent.
+    if (!alertStateColumns.some((c) => c.name === 'cooldown_seconds')) {
+      this.db.exec(
+        'ALTER TABLE integration_alert_state ADD COLUMN cooldown_seconds INTEGER',
+      );
+    }
+    // Alert throttling polish (2026-04-23): mark incidents that were closed
+    // by the IntegrationAlertMonitor recovery path so the /incidents UI can
+    // render a "Recovered integrations (24h)" callout.
+    if (!incidentColumns.some((c) => c.name === 'auto_resolved')) {
+      this.db.exec(
+        'ALTER TABLE incidents ADD COLUMN auto_resolved INTEGER NOT NULL DEFAULT 0',
       );
     }
   }
@@ -418,8 +530,15 @@ export class SqliteHistoryStore implements HistoryStore {
    * Close the most recently opened incident for `appName` that is still open
    * (incident_end IS NULL). Populates `incident_end` + `duration_min`.
    * Returns the updated row, or null if no open incident existed.
+   *
+   * `opts.autoResolved=true` flips the row's `auto_resolved` flag to 1 so the
+   * /incidents page can render the "Recovered integrations (24h)" callout.
    */
-  closeIncident(appName: string, endedAtIso: string): IncidentRow | null {
+  closeIncident(
+    appName: string,
+    endedAtIso: string,
+    opts: { autoResolved?: boolean } = {},
+  ): IncidentRow | null {
     const open = this.getOpenIncident(appName);
     if (!open) return null;
     const startMs = Date.parse(open.incident_start);
@@ -427,20 +546,24 @@ export class SqliteHistoryStore implements HistoryStore {
     const durationMin = Number.isFinite(startMs) && Number.isFinite(endMs)
       ? Math.max(0, (endMs - startMs) / 60000)
       : null;
+    const autoResolved = opts.autoResolved ? 1 : 0;
     this.db
-      .prepare('UPDATE incidents SET incident_end = ?, duration_min = ? WHERE id = ?')
-      .run(endedAtIso, durationMin, open.id);
+      .prepare(
+        'UPDATE incidents SET incident_end = ?, duration_min = ?, auto_resolved = ? WHERE id = ?',
+      )
+      .run(endedAtIso, durationMin, autoResolved, open.id);
     return {
       ...open,
       incident_end: endedAtIso,
       duration_min: durationMin,
+      auto_resolved: autoResolved,
     };
   }
 
   getOpenIncident(appName: string): IncidentRow | null {
     const row = this.db
       .prepare(
-        'SELECT id, app_name, incident_start, incident_end, duration_min, reason, root_cause FROM incidents WHERE app_name = ? AND incident_end IS NULL ORDER BY incident_start DESC LIMIT 1',
+        'SELECT id, app_name, incident_start, incident_end, duration_min, reason, root_cause, auto_resolved FROM incidents WHERE app_name = ? AND incident_end IS NULL ORDER BY incident_start DESC LIMIT 1',
       )
       .get(appName) as IncidentRow | undefined;
     return row ?? null;
@@ -452,11 +575,14 @@ export class SqliteHistoryStore implements HistoryStore {
     const since = new Date((query.nowMs ?? this.now()) - days * 86400_000).toISOString();
     const params: unknown[] = [];
     let sql =
-      'SELECT id, app_name, incident_start, incident_end, duration_min, reason, root_cause FROM incidents WHERE incident_start >= ?';
+      'SELECT id, app_name, incident_start, incident_end, duration_min, reason, root_cause, auto_resolved FROM incidents WHERE incident_start >= ?';
     params.push(since);
     if (query.app) {
       sql += ' AND app_name = ?';
       params.push(query.app);
+    }
+    if (query.autoResolvedOnly) {
+      sql += ' AND auto_resolved = 1';
     }
     sql += ' ORDER BY incident_start DESC LIMIT ?';
     params.push(limit);
@@ -473,7 +599,7 @@ export class SqliteHistoryStore implements HistoryStore {
   getIncidentById(id: number): IncidentRow | null {
     const row = this.db
       .prepare(
-        'SELECT id, app_name, incident_start, incident_end, duration_min, reason, root_cause FROM incidents WHERE id = ?',
+        'SELECT id, app_name, incident_start, incident_end, duration_min, reason, root_cause, auto_resolved FROM incidents WHERE id = ?',
       )
       .get(id) as IncidentRow | undefined;
     return row ?? null;
@@ -768,6 +894,106 @@ export class SqliteHistoryStore implements HistoryStore {
       .prepare('UPDATE incidents SET root_cause = ? WHERE id = ?')
       .run(rootCause, incidentId);
     return result.changes > 0;
+  }
+
+  /**
+   * Persist a per-integration cooldown override (seconds). Idempotent: reuses
+   * the most-recent row for the integration, or inserts a stub for today's
+   * UTC date when none exists. `seconds=null` clears the override.
+   */
+  setIntegrationCooldownOverride(
+    integrationName: string,
+    seconds: number | null,
+  ): void {
+    const existing = this.db
+      .prepare(
+        `SELECT date FROM integration_alert_state
+          WHERE integration_name = ?
+          ORDER BY alerted_at DESC, date DESC LIMIT 1`,
+      )
+      .get(integrationName) as { date: string } | undefined;
+    if (existing) {
+      // Update all rows for this integration so the override propagates
+      // regardless of which row the cooldown read happens to find first.
+      this.db
+        .prepare(
+          'UPDATE integration_alert_state SET cooldown_seconds = ? WHERE integration_name = ?',
+        )
+        .run(seconds, integrationName);
+      return;
+    }
+    // No row yet — insert a stub. We need a date + alerted_at + success_rate
+    // to satisfy NOT NULL columns. Use a conservative success_rate=1.0 so
+    // this stub is harmless if it's ever read for "did we alert?" purposes.
+    const now = new Date(this.now());
+    const yyyy = now.getUTCFullYear();
+    const mm = String(now.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(now.getUTCDate()).padStart(2, '0');
+    const date = `${yyyy}-${mm}-${dd}`;
+    this.db
+      .prepare(
+        `INSERT INTO integration_alert_state
+           (integration_name, date, success_rate, alerted_at, last_fired_at, cooldown_seconds)
+         VALUES (?, ?, 1.0, ?, NULL, ?)`,
+      )
+      .run(integrationName, date, now.toISOString(), seconds);
+  }
+
+  /**
+   * Read the most-recent non-null cooldown_seconds value for an integration.
+   * Returns null when no override has been set (callers fall back to env
+   * default).
+   */
+  getIntegrationCooldownOverride(integrationName: string): number | null {
+    const row = this.db
+      .prepare(
+        `SELECT cooldown_seconds
+           FROM integration_alert_state
+          WHERE integration_name = ?
+            AND cooldown_seconds IS NOT NULL
+          ORDER BY alerted_at DESC LIMIT 1`,
+      )
+      .get(integrationName) as { cooldown_seconds: number | null } | undefined;
+    if (!row || row.cooldown_seconds === null || row.cooldown_seconds === undefined) {
+      return null;
+    }
+    return Number(row.cooldown_seconds);
+  }
+
+  /**
+   * Append an alert audit row. Truncates `reason` to 500 chars so a runaway
+   * alert message can't bloat the table.
+   */
+  recordAlertAudit(row: Omit<AlertAuditRow, 'id'>): number {
+    const reason = (row.reason ?? '').slice(0, 500);
+    const result = this.db
+      .prepare(
+        `INSERT INTO alert_audit_log
+           (at, integration_name, outcome, reason, severity, success_rate)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.at,
+        row.integration_name,
+        row.outcome,
+        reason,
+        row.severity ?? null,
+        row.success_rate ?? null,
+      );
+    return Number(result.lastInsertRowid);
+  }
+
+  /** Most-recent N audit rows ordered newest-first. */
+  listAlertAudits(query: AlertAuditQuery = {}): AlertAuditRow[] {
+    const limit = Math.max(1, Math.min(500, query.limit ?? 50));
+    return this.db
+      .prepare(
+        `SELECT id, at, integration_name, outcome, reason, severity, success_rate
+           FROM alert_audit_log
+          ORDER BY id DESC
+          LIMIT ?`,
+      )
+      .all(limit) as AlertAuditRow[];
   }
 
   close(): void {

@@ -7,7 +7,65 @@ touched. Yellow = up but idle. Red = down. Minimal, clean, fast — a v1
 monitor that we can layer features onto (alerting, incident history,
 per-user views) as the empire grows.
 
-## Current state — 88% (2026-04-22)
+## Current state — 89% (2026-04-23)
+- Alert throttling polish landed on `nightly-2026-04-23-alert-and-scenedrift`:
+  * `GET /api/alerts/recent?limit=N` audit endpoint backed by new
+    `alert_audit_log` SQLite table (default 50, clamped [1,500], 503 when
+    historyStore unavailable). `IntegrationAlertMonitor` writes one
+    `outcome="fired"` row on every actual alert/recovery delivery and one
+    `outcome="suppressed"` row for both the per-day dedupe skip and the
+    per-hour cooldown skip — so the audit feed is the single ground-truth
+    timeline of every alert decision.
+  * Cooldown is now configurable two ways: env `INTEGRATION_ALERT_COOLDOWN_SECONDS`
+    (default 3600, plumbed through `RuntimeConfig.integrationAlertCooldownSeconds`
+    → `IntegrationAlertMonitor.cooldownMs`), AND a per-key SQLite override on
+    a new nullable `cooldown_seconds` column on `integration_alert_state`
+    (idempotent ALTER TABLE migration). Override read via
+    `getIntegrationCooldownOverride(name)`; write via
+    `setIntegrationCooldownOverride(name, seconds)`. Override wins when
+    >0; bad/zero/negative values fall back to the env default to avoid
+    accidentally disabling cooldown.
+  * `closeIncident` gained an optional `{ autoResolved }` flag and the
+    incidents table gained an `auto_resolved INTEGER NOT NULL DEFAULT 0`
+    column. `IntegrationAlertMonitor.maybeRecover` now passes
+    `{ autoResolved: true }` when it closes a synthetic incident — so the
+    /incidents page can render the "Recovered integrations (24h)" callout
+    banner with a click-through to `?auto_resolved=true`. The
+    `/api/incidents` endpoint now accepts `?auto_resolved=true|1` and
+    returns `autoResolvedOnly` in the response payload.
+  * `/incidents` page: new `recovered-banner` section above the toolbar.
+    Shows count + "View recovered" CTA when count > 0; switches to a
+    "Showing recovered only · Clear filter" affordance when the URL filter
+    is active.
+  * +14 new tests in `tests/alertThrottlingPolish.test.ts`: endpoint shape +
+    default/clamped limits + 503 path, audit accounting (fired + suppressed
+    rows from cooldown), per-key override precedence, env-default fallback,
+    `INTEGRATION_ALERT_COOLDOWN_SECONDS` env loading (4 cases), audit-row
+    truncation (500 chars), `setIntegrationCooldownOverride` insert/update/
+    clear cycle, banner render path (3 variants), click-through filter +
+    auto_resolved=1 marking via the monitor.
+- Scene-drift tile v2 landed on the same branch:
+  * Reads `flag_classification` per-scene from the
+    Content-Engine `/api/integration/scene-drift` payload (chronic / spike /
+    stable). Surfaces per-row classification pills (`tile__detail-badge--*`)
+    and per-tile aggregate badge counts (`tile__badges` w/ chronic = red,
+    spike = yellow, stable = green). The tile is promoted to `state=warn`
+    whenever any scene is chronic, even when no scene clears the
+    over-represented top-3 cutoff.
+  * Aggregate counts come from the new exported helper
+    `computeClassificationCounts(scenes)`. It returns `undefined` when no
+    scene carries a recognized classification — that's the legacy fallback
+    path so the v1 render is preserved when the upstream payload omits the
+    field. Garbage classification strings are ignored (typed-string guard).
+  * +7 new tests in `tests/sceneDriftTileV2.test.ts`: per-row pill mapping,
+    HTML render assertions for chronic/spike/stable badges, 0-count badges
+    omitted, stable-only payload stays `state=ok`, chronic alone promotes
+    `state=warn`, legacy fallback path renders no badges + no crash, garbage
+    classification strings ignored.
+- 404 tests passing (up from 381, +23), 96.63% statement / 88.19% branch /
+  97.53% line coverage. All pre-existing tests untouched behavior-wise.
+
+## Prior state — 88% (2026-04-22)
 - Incidents v6 UI landed on `incidents-v6-ui` (merged to main after
   rebasing onto the Phase 4 merge below):
   * `/incidents` page renders an inline `root_cause` editor per incident
@@ -203,6 +261,57 @@ dearborn-ai-agents, DDA-CS-Manager, diamond-pickaxe-returns-processor.
 _(none yet — newly built)_
 
 ## Build history
+### 2026-04-23 — alert throttling polish + scene-drift tile v2
+- Feature branch `nightly-2026-04-23-alert-and-scenedrift`, merged to `main`
+- `historyStore.ts`: new `alert_audit_log` table (one row per attempted alert
+  fire, fired/suppressed); new `recordAlertAudit` (truncates `reason` to 500
+  chars) + `listAlertAudits({ limit })` (clamped [1,500]); idempotent ALTER
+  TABLE adding nullable `cooldown_seconds` to `integration_alert_state` +
+  `setIntegrationCooldownOverride(name, seconds|null)` /
+  `getIntegrationCooldownOverride(name)`; idempotent ALTER TABLE adding
+  `auto_resolved INTEGER NOT NULL DEFAULT 0` to `incidents`; `closeIncident`
+  gained `{ autoResolved }` flag and now writes the column; `listIncidents`
+  + `IncidentsQuery` got an `autoResolvedOnly` filter; `getOpenIncident` /
+  `getIncidentById` SELECT lists extended.
+- `integrationAlertMonitor.ts`: per-key cooldown override resolution
+  (`resolveCooldownMs`) with bad-value fallback; audit-row writes for the
+  fire path, the recovery path, the per-day-dedupe skip, and the cooldown
+  skip via `safeRecordAudit`; recovery now closes the synthetic incident
+  with `{ autoResolved: true }`.
+- `config.ts`: new `RuntimeConfig.integrationAlertCooldownSeconds` (env
+  `INTEGRATION_ALERT_COOLDOWN_SECONDS`, default 3600, with bad-value
+  fallback). `index.ts` plumbs it as `cooldownMs` on the monitor.
+- `app.ts`: new `GET /api/alerts/recent?limit=N` endpoint (default 50,
+  clamped [1,500], 503 when no store); `/api/incidents` accepts
+  `?auto_resolved=true|1` and returns `autoResolvedOnly` in the response;
+  `/incidents` page route reads `?auto_resolved=...`, computes 24h
+  recovered count for the banner, and passes both to `renderIncidentsPage`;
+  `serializeIncidents` now emits `autoResolved: boolean`.
+- `render.ts`: new `RenderIncidentsPageOptions.recoveredCount24h` +
+  `autoResolvedFilterActive`; new `renderRecoveredBanner` (info-tone
+  callout w/ pluralized noun + click-through CTA, or active-tone affordance
+  when filter is on); `renderIntegrationTiles` extended with
+  `renderClassificationBadges` (chronic/spike/stable pills above tile body)
+  and per-detail `tile__detail-badge--*` pills.
+- `integrationTiles.ts`: new `FlagClassification` + `FlagClassificationCounts`
+  types; `IntegrationTile` extended with `classificationCounts` +
+  per-detail `classification`; `parseDriftScene` reads `flag_classification`
+  from upstream payload (chronic|spike|stable, ignores garbage); new
+  exported helper `computeClassificationCounts` returns undefined when no
+  scene carries a classification (legacy fallback); tile is promoted to
+  warn when any scene is chronic.
+- `public/styles.css`: new `.tile__badges`, `.tile__badge--chronic|spike|stable`,
+  `.tile__detail-badge*`, `.recovered-banner*` rulesets.
+- Tests: +23 (381 → 404). New files: `alertThrottlingPolish.test.ts` (16),
+  `sceneDriftTileV2.test.ts` (7). Existing mock stores in `app.test.ts`,
+  `app.incidents.test.ts`, `app.incidentStats.test.ts`, `coverage.test.ts`
+  updated for the 4 new HistoryStore methods + the
+  `integrationAlertCooldownSeconds` field on RuntimeConfig literals across
+  7 test files. `serializeIncidents` round-trip test extended to assert the
+  new `autoResolved: false` default. `incidentsV5.test.ts`
+  `serializeIncidentsCsv` literal updated.
+- Coverage: 96.63% stmt / 88.19% branch / 97.53% line (thresholds 80/70/80/80).
+
 ### 2026-04-22 — integration observability Phase 4 (hourly cooldown + recovery)
 - Feature branch `phase-4-integration-obs`, merged to `main` via fast-forward
 - `historyStore.ts`: added `last_fired_at` column on `integration_alert_state`

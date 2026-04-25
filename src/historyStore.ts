@@ -158,6 +158,52 @@ export interface AlertAuditRow {
 export interface AlertAuditQuery {
   /** Default 50, max 500 (caller enforces clamp). */
   limit?: number;
+  /**
+   * Alert audit UI (2026-04-24): filter to a single integration_name. Exact
+   * match. Undefined / empty string returns all integrations.
+   */
+  integration?: string;
+  /**
+   * Alert audit UI (2026-04-24): only return rows whose `at` is within the
+   * last N days. Undefined returns all rows in the table.
+   */
+  days?: number;
+  /**
+   * Alert audit UI (2026-04-24): clock injector for tests so the days filter
+   * is deterministic. Defaults to `Date.now()`.
+   */
+  nowMs?: number;
+  /**
+   * Alert audit UI (2026-04-24): filter to a single derived decision. The
+   * underlying audit rows only carry `outcome` ("fired" | "suppressed"), but
+   * the UI surfaces four buckets:
+   *   - "fire"     — outcome=fired AND severity!=info
+   *   - "suppress" — outcome=suppressed AND reason does NOT start with "cooldown"
+   *   - "recovery" — outcome=fired AND severity=info
+   *   - "cooldown" — outcome=suppressed AND reason starts with "cooldown"
+   * Undefined returns all decisions.
+   */
+  decision?: 'fire' | 'suppress' | 'recovery' | 'cooldown';
+}
+
+/**
+ * Alert audit UI (2026-04-24): derived decision bucket surfaced on the
+ * /alerts/audit UI. See `AlertAuditQuery.decision` for the rules.
+ */
+export type AlertAuditDecision = 'fire' | 'suppress' | 'recovery' | 'cooldown';
+
+export function deriveAlertDecision(row: {
+  outcome: string;
+  reason: string | null;
+  severity: string | null;
+}): AlertAuditDecision {
+  const reason = (row.reason ?? '').toLowerCase();
+  if (row.outcome === 'fired') {
+    if (row.severity === 'info') return 'recovery';
+    return 'fire';
+  }
+  if (reason.startsWith('cooldown')) return 'cooldown';
+  return 'suppress';
 }
 
 export interface IncidentStatsQuery {
@@ -265,6 +311,12 @@ export interface HistoryStore {
    * caller is expected to clamp `limit` to [1, 500].
    */
   listAlertAudits(query?: AlertAuditQuery): AlertAuditRow[];
+  /**
+   * Alert audit UI (2026-04-24): count rows matching `query` (excluding
+   * `limit`). Used by the /alerts/audit page to render a "more rows exist"
+   * footer when the result was truncated.
+   */
+  countAlertAudits(query?: AlertAuditQuery): number;
   close(): void;
 }
 
@@ -986,14 +1038,69 @@ export class SqliteHistoryStore implements HistoryStore {
   /** Most-recent N audit rows ordered newest-first. */
   listAlertAudits(query: AlertAuditQuery = {}): AlertAuditRow[] {
     const limit = Math.max(1, Math.min(500, query.limit ?? 50));
+    const { sql, params } = this.buildAlertAuditQuery(query);
     return this.db
-      .prepare(
-        `SELECT id, at, integration_name, outcome, reason, severity, success_rate
-           FROM alert_audit_log
-          ORDER BY id DESC
-          LIMIT ?`,
-      )
-      .all(limit) as AlertAuditRow[];
+      .prepare(`${sql} ORDER BY id DESC LIMIT ?`)
+      .all(...params, limit) as AlertAuditRow[];
+  }
+
+  /**
+   * Alert audit UI (2026-04-24): count matching audit rows so the UI can
+   * surface a "more rows exist" footer when the result set was truncated by
+   * the limit.
+   */
+  countAlertAudits(query: AlertAuditQuery = {}): number {
+    const { sql, params } = this.buildAlertAuditQuery(query);
+    // Replace SELECT col list with COUNT(*) — keep the rest verbatim.
+    const countSql = sql.replace(
+      /^SELECT[\s\S]+?FROM/,
+      'SELECT COUNT(*) AS c FROM',
+    );
+    const row = this.db.prepare(countSql).get(...params) as { c: number };
+    return row?.c ?? 0;
+  }
+
+  /**
+   * Build the SELECT body + params for the alert audit list/count helpers.
+   * Centralised so list + count share the exact same WHERE filter behaviour.
+   * The decision filter is implemented via SQL (no post-filter) so the count
+   * can be computed without materialising rows.
+   */
+  private buildAlertAuditQuery(query: AlertAuditQuery): {
+    sql: string;
+    params: unknown[];
+  } {
+    const wheres: string[] = [];
+    const params: unknown[] = [];
+    const integration = (query.integration ?? '').trim();
+    if (integration) {
+      wheres.push('integration_name = ?');
+      params.push(integration);
+    }
+    if (typeof query.days === 'number' && Number.isFinite(query.days) && query.days > 0) {
+      const since = new Date((query.nowMs ?? this.now()) - query.days * 86400_000).toISOString();
+      wheres.push('at >= ?');
+      params.push(since);
+    }
+    if (query.decision) {
+      switch (query.decision) {
+        case 'fire':
+          wheres.push("outcome = 'fired' AND (severity IS NULL OR severity != 'info')");
+          break;
+        case 'recovery':
+          wheres.push("outcome = 'fired' AND severity = 'info'");
+          break;
+        case 'cooldown':
+          wheres.push("outcome = 'suppressed' AND lower(reason) LIKE 'cooldown%'");
+          break;
+        case 'suppress':
+          wheres.push("outcome = 'suppressed' AND lower(reason) NOT LIKE 'cooldown%'");
+          break;
+      }
+    }
+    const whereClause = wheres.length > 0 ? ` WHERE ${wheres.join(' AND ')}` : '';
+    const sql = `SELECT id, at, integration_name, outcome, reason, severity, success_rate FROM alert_audit_log${whereClause}`;
+    return { sql, params };
   }
 
   close(): void {

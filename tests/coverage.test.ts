@@ -310,6 +310,7 @@ describe('app.ts — additional error paths', () => {
       getIntegrationCooldownOverride: jest.fn(() => null),
       recordAlertAudit: jest.fn(() => 1),
       listAlertAudits: jest.fn(() => []),
+      countAlertAudits: jest.fn(() => 0),
       close: jest.fn(),
     };
     const app = createApp({ ...buildDeps(), historyStore: broken });
@@ -348,6 +349,7 @@ describe('app.ts — additional error paths', () => {
       getIntegrationCooldownOverride: jest.fn(() => null),
       recordAlertAudit: jest.fn(() => 1),
       listAlertAudits: jest.fn(() => []),
+      countAlertAudits: jest.fn(() => 0),
       close: jest.fn(),
     };
     const app = createApp({
@@ -393,6 +395,7 @@ describe('app.ts — additional error paths', () => {
       getIntegrationCooldownOverride: jest.fn(() => null),
       recordAlertAudit: jest.fn(() => 1),
       listAlertAudits: jest.fn(() => []),
+      countAlertAudits: jest.fn(() => 0),
       close: jest.fn(),
     };
     const app = createApp({ ...buildDeps(), historyStore: broken });
@@ -457,6 +460,7 @@ describe('app.ts — additional error paths', () => {
       getIntegrationCooldownOverride: jest.fn(() => null),
       recordAlertAudit: jest.fn(() => 1),
       listAlertAudits: jest.fn(() => []),
+      countAlertAudits: jest.fn(() => 0),
       close: jest.fn(),
     };
     const app = createApp({ ...buildDeps(), historyStore: weirdStore });

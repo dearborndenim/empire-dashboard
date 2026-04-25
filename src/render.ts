@@ -1,6 +1,7 @@
 import { AppStatus } from './status';
 import { truncateMessage } from './truncate';
 import { IntegrationTile } from './integrationTiles';
+import { AlertAuditRow, deriveAlertDecision } from './historyStore';
 
 export function escapeHtml(value: string): string {
   return value
@@ -446,6 +447,135 @@ ${cards}
     </footer>
   </main>
   ${renderIncidentsClientScript()}
+</body>
+</html>`;
+}
+
+/**
+ * Alert audit UI (2026-04-24): server-rendered HTML page at /alerts/audit.
+ * Mirrors the styling/scaffold of /incidents (wrap > head > main, /styles.css).
+ */
+export interface RenderAlertAuditPageOptions {
+  generatedAt: string;
+  rows: AlertAuditRow[];
+  /** Total rows matching the active filters, ignoring `rowLimit`. */
+  totalMatched: number;
+  /** Cap applied to `rows.length`. Default 500. */
+  rowLimit: number;
+  /** Currently-active filter values (used to populate the filter form). */
+  filters: {
+    integration: string;
+    decision: string;
+    days: number;
+  };
+}
+
+export function renderAlertAuditPage(opts: RenderAlertAuditPageOptions): string {
+  const { rows, totalMatched, rowLimit, filters } = opts;
+  const rowsHtml = rows.length === 0
+    ? `<tr><td colspan="6" class="alert-audit__empty">No alert audit rows match the current filters.</td></tr>`
+    : rows
+        .map((r) => {
+          const decision = deriveAlertDecision(r);
+          const reason = r.reason ?? '';
+          const severity = r.severity ?? '';
+          return `<tr class="alert-audit__row alert-audit__row--${decision}">
+            <td class="alert-audit__cell alert-audit__cell--at">${escapeHtml(r.at)}</td>
+            <td class="alert-audit__cell alert-audit__cell--integration">${escapeHtml(r.integration_name)}</td>
+            <td class="alert-audit__cell alert-audit__cell--decision">
+              <span class="alert-audit__pill alert-audit__pill--${decision}">${escapeHtml(decision)}</span>
+            </td>
+            <td class="alert-audit__cell alert-audit__cell--severity">${escapeHtml(severity)}</td>
+            <td class="alert-audit__cell alert-audit__cell--rate">${r.success_rate === null || r.success_rate === undefined ? '' : escapeHtml((r.success_rate * 100).toFixed(1) + '%')}</td>
+            <td class="alert-audit__cell alert-audit__cell--reason">${escapeHtml(reason)}</td>
+          </tr>`;
+        })
+        .join('\n');
+
+  const truncated = totalMatched > rows.length;
+  const footerNote = truncated
+    ? `<p class="alert-audit__truncated">Showing ${rows.length} of ${totalMatched} matching rows (capped at ${rowLimit}). Tighten the filters to see older rows.</p>`
+    : `<p class="alert-audit__count">${rows.length} row${rows.length === 1 ? '' : 's'} matched.</p>`;
+
+  const decisionOptions = ['', 'fire', 'suppress', 'recovery', 'cooldown']
+    .map((d) => {
+      const label = d === '' ? 'All' : d;
+      const selected = filters.decision === d ? ' selected' : '';
+      return `<option value="${escapeHtml(d)}"${selected}>${escapeHtml(label)}</option>`;
+    })
+    .join('');
+
+  const csvHref = `/alerts/audit.csv?days=${encodeURIComponent(String(filters.days))}${
+    filters.integration ? `&integration=${encodeURIComponent(filters.integration)}` : ''
+  }${filters.decision ? `&decision=${encodeURIComponent(filters.decision)}` : ''}`;
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Alert audit · Empire Dashboard</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="wrap">
+    <header class="head">
+      <h1>Alert audit</h1>
+      <div class="generated">Generated ${escapeHtml(opts.generatedAt)}</div>
+    </header>
+    <section class="alert-audit__filters" aria-label="Filters">
+      <form class="alert-audit__form" method="get" action="/alerts/audit">
+        <label class="alert-audit__label">
+          Integration
+          <input class="alert-audit__input" type="text" name="integration" value="${escapeHtml(filters.integration)}" placeholder="(all)" maxlength="100" />
+        </label>
+        <label class="alert-audit__label">
+          Decision
+          <select class="alert-audit__select" name="decision">
+            ${decisionOptions}
+          </select>
+        </label>
+        <label class="alert-audit__label">
+          Last
+          <select class="alert-audit__select" name="days">
+            ${[1, 7, 14, 30]
+              .map(
+                (d) =>
+                  `<option value="${d}"${filters.days === d ? ' selected' : ''}>${d} day${d === 1 ? '' : 's'}</option>`,
+              )
+              .join('')}
+          </select>
+        </label>
+        <button class="alert-audit__button" type="submit">Apply</button>
+        <a class="alert-audit__csv" href="${escapeHtml(csvHref)}">Download CSV</a>
+      </form>
+    </section>
+    <section class="alert-audit__table-wrap">
+      <table class="alert-audit__table">
+        <thead>
+          <tr>
+            <th>Timestamp</th>
+            <th>Integration</th>
+            <th>Decision</th>
+            <th>Severity</th>
+            <th>Success rate</th>
+            <th>Reason / detail</th>
+          </tr>
+        </thead>
+        <tbody>
+${rowsHtml}
+        </tbody>
+      </table>
+      ${footerNote}
+    </section>
+    <footer class="foot">
+      <a href="/">← home</a>
+      &middot;
+      <a href="/incidents">/incidents</a>
+      &middot;
+      <a href="/api/alerts/recent">/api/alerts/recent</a>
+    </footer>
+  </main>
 </body>
 </html>`;
 }

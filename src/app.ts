@@ -1,11 +1,23 @@
-import express, { Express } from 'express';
+import express, { Express, Request, Response } from 'express';
 import path from 'path';
 import { RuntimeConfig } from './config';
 import { HealthChecker } from './healthChecker';
 import { ActivityTracker } from './activityTracker';
 import { combineStatus, AppStatus } from './status';
-import { renderDashboard, renderIncidentsPage, RenderPruneRun } from './render';
-import { HistoryStore, SampleStatus, IncidentRow } from './historyStore';
+import {
+  renderDashboard,
+  renderIncidentsPage,
+  RenderPruneRun,
+  renderAlertAuditPage,
+} from './render';
+import {
+  HistoryStore,
+  SampleStatus,
+  IncidentRow,
+  AlertAuditRow,
+  AlertAuditQuery,
+  deriveAlertDecision,
+} from './historyStore';
 import { bucketsToSparkline, formatUptimePercent } from './sparkline';
 import { IncidentTracker } from './incidentTracker';
 import { IntegrationTilesFetcher, IntegrationTile } from './integrationTiles';
@@ -191,6 +203,133 @@ export function serializeIncidentsCsv(incidents: SerializedIncident[]): string {
     );
   }
   return lines.join('\r\n') + '\r\n';
+}
+
+/**
+ * Alert audit UI (2026-04-24): CSV header for /alerts/audit.csv. Stable so
+ * external tooling can rely on the column order.
+ */
+export const ALERT_AUDIT_CSV_HEADER = [
+  'id',
+  'at',
+  'integration',
+  'decision',
+  'outcome',
+  'severity',
+  'success_rate',
+  'reason',
+].join(',');
+
+export function serializeAlertAuditCsv(rows: AlertAuditRow[]): string {
+  const lines = [ALERT_AUDIT_CSV_HEADER];
+  for (const r of rows) {
+    const decision = deriveAlertDecision(r);
+    lines.push(
+      [
+        csvCell(r.id),
+        csvCell(r.at),
+        csvCell(r.integration_name),
+        csvCell(decision),
+        csvCell(r.outcome),
+        csvCell(r.severity ?? ''),
+        csvCell(r.success_rate ?? ''),
+        csvCell(r.reason ?? ''),
+      ].join(','),
+    );
+  }
+  return lines.join('\r\n') + '\r\n';
+}
+
+/**
+ * Pull the configured admin token from the request (x-admin-token header
+ * preferred, falls back to Authorization: Bearer). Returns null when nothing
+ * is set or trimmed empty.
+ */
+function readAdminToken(req: Request): string | null {
+  const headerToken =
+    req.header('x-admin-token') ||
+    (req.header('authorization') ?? '').replace(/^Bearer\s+/i, '');
+  const trimmed = (headerToken ?? '').trim();
+  return trimmed ? trimmed : null;
+}
+
+/**
+ * Auth gate for JSON endpoints. Returns true when the request is allowed to
+ * proceed; otherwise writes the appropriate response and returns false. 503
+ * when no token is configured server-side, 401 on mismatch.
+ */
+function requireAdminToken(
+  req: Request,
+  res: Response,
+  configuredToken: string | undefined,
+): boolean {
+  if (!configuredToken) {
+    res.status(503).json({ error: 'admin endpoint disabled (no admin token configured)' });
+    return false;
+  }
+  const provided = readAdminToken(req);
+  if (provided !== configuredToken) {
+    res.status(401).json({ error: 'unauthorized' });
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Same gate as `requireAdminToken` but writes plain HTML/text for the page
+ * routes so we don't accidentally serve JSON to a browser.
+ */
+function requireAdminTokenForHtml(
+  req: Request,
+  res: Response,
+  configuredToken: string | undefined,
+): boolean {
+  if (!configuredToken) {
+    res.status(503).setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send('<h1>admin endpoint disabled</h1><p>No admin token configured.</p>');
+    return false;
+  }
+  const provided = readAdminToken(req);
+  if (provided !== configuredToken) {
+    res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send('<h1>unauthorized</h1><p>Set the <code>x-admin-token</code> header.</p>');
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Clamp + parse an integer query param. Returns `defaultValue` when missing,
+ * non-numeric, NaN, or out of range (after clamping). Used by the recovered
+ * JSON endpoint and the alert audit page for `?days`.
+ */
+function clampInt(
+  raw: unknown,
+  opts: { defaultValue: number; min: number; max: number },
+): number {
+  if (typeof raw !== 'string') return opts.defaultValue;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return opts.defaultValue;
+  return Math.max(opts.min, Math.min(opts.max, Math.floor(parsed)));
+}
+
+/**
+ * Parse the alert-audit filter query string off a request. Centralised so
+ * the page route, CSV route, and tests build the exact same shape.
+ */
+function buildAlertAuditQueryFromReq(req: Request): AlertAuditQuery {
+  const integration = typeof req.query.integration === 'string' ? req.query.integration.trim() : '';
+  const decisionRaw = typeof req.query.decision === 'string' ? req.query.decision.trim() : '';
+  const validDecisions = ['fire', 'suppress', 'recovery', 'cooldown'] as const;
+  const decision =
+    (validDecisions as readonly string[]).includes(decisionRaw)
+      ? (decisionRaw as AlertAuditQuery['decision'])
+      : undefined;
+  const days = clampInt(req.query.days, { defaultValue: 7, min: 1, max: 30 });
+  const query: AlertAuditQuery = { days };
+  if (integration) query.integration = integration;
+  if (decision) query.decision = decision;
+  return query;
 }
 
 export function createApp(deps: AppDeps): Express {
@@ -450,6 +589,128 @@ export function createApp(deps: AppDeps): Express {
       res.status(500).json({
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+  });
+
+  /**
+   * Recovery banner click-through JSON endpoint (2026-04-24). Lets external
+   * tooling (e.g. McSecretary) query auto-resolved (recovered) integrations
+   * over the last N days without scraping the /incidents HTML page.
+   *
+   * Auth: requires the same INCIDENTS_ADMIN_TOKEN as POST /note. Returns 503
+   * when token is unset, 401 on mismatch.
+   */
+  app.get('/api/incidents/recovered', (req, res) => {
+    try {
+      if (!deps.historyStore) {
+        res.status(503).json({ error: 'history store unavailable' });
+        return;
+      }
+      if (!requireAdminToken(req, res, deps.incidentsAdminToken)) return;
+      const days = clampInt(req.query.days, { defaultValue: 1, min: 1, max: 30 });
+      const appName = typeof req.query.app === 'string' ? req.query.app.trim() : '';
+      const rows = deps.historyStore.listIncidents({
+        days,
+        autoResolvedOnly: true,
+        app: appName || undefined,
+        limit: 1000,
+      });
+      // Only surface closed incidents — auto_resolved should imply closed_at,
+      // but defense-in-depth: filter rows without an end timestamp.
+      const recovered = rows
+        .filter((r) => r.incident_end !== null)
+        .map((r) => {
+          const startedMs = Date.parse(r.incident_start);
+          const closedMs = Date.parse(r.incident_end as string);
+          const mttrSeconds =
+            Number.isFinite(startedMs) && Number.isFinite(closedMs)
+              ? Math.max(0, Math.round((closedMs - startedMs) / 1000))
+              : null;
+          return {
+            integration_name: r.app_name,
+            opened_at: r.incident_start,
+            closed_at: r.incident_end,
+            mttr_seconds: mttrSeconds,
+          };
+        })
+        // Newest closed_at first.
+        .sort((a, b) => {
+          const aMs = Date.parse(a.closed_at as string);
+          const bMs = Date.parse(b.closed_at as string);
+          return (Number.isFinite(bMs) ? bMs : 0) - (Number.isFinite(aMs) ? aMs : 0);
+        });
+      res.json({
+        generatedAt: new Date().toISOString(),
+        windowDays: days,
+        count: recovered.length,
+        recovered,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  /**
+   * Alert audit UI (2026-04-24): server-rendered HTML browser for the
+   * `alert_audit_log` table. Same auth gate as the recovered JSON endpoint
+   * above. Filters: ?integration, ?decision (fire|suppress|recovery|cooldown),
+   * ?days (default 7, max 30). Sort: newest first. Row limit: 500 with a
+   * "more rows exist" footer when truncated.
+   */
+  app.get('/alerts/audit', (req, res) => {
+    try {
+      if (!deps.historyStore) {
+        res.status(503).send('<h1>history store unavailable</h1>');
+        return;
+      }
+      if (!requireAdminTokenForHtml(req, res, deps.incidentsAdminToken)) return;
+      const query = buildAlertAuditQueryFromReq(req);
+      const rows = deps.historyStore.listAlertAudits({ ...query, limit: 500 });
+      const totalMatched = deps.historyStore.countAlertAudits(query);
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(
+        renderAlertAuditPage({
+          generatedAt: new Date().toISOString(),
+          rows,
+          totalMatched,
+          rowLimit: 500,
+          filters: {
+            integration: query.integration ?? '',
+            decision: query.decision ?? '',
+            days: query.days ?? 7,
+          },
+        }),
+      );
+    } catch (err) {
+      res.status(500).send(
+        `<h1>Alert audit page error</h1><pre>${err instanceof Error ? err.message : String(err)}</pre>`,
+      );
+    }
+  });
+
+  /** CSV export companion to /alerts/audit. Same filters + same auth gate. */
+  app.get('/alerts/audit.csv', (req, res) => {
+    try {
+      if (!deps.historyStore) {
+        res.status(503).send('history store unavailable');
+        return;
+      }
+      if (!requireAdminToken(req, res, deps.incidentsAdminToken)) return;
+      const query = buildAlertAuditQueryFromReq(req);
+      const rows = deps.historyStore.listAlertAudits({ ...query, limit: 500 });
+      const csv = serializeAlertAuditCsv(rows);
+      const filename = `alert-audit-${query.days ?? 7}d-${new Date()
+        .toISOString()
+        .slice(0, 10)}.csv`;
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.send(csv);
+    } catch (err) {
+      res.status(500).send(
+        err instanceof Error ? err.message : String(err),
+      );
     }
   });
 

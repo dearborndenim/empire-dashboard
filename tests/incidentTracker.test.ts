@@ -69,8 +69,11 @@ describe('IncidentTracker', () => {
     expect(t.process(mkHealth({ name: 'A', state: 'up' }))).toBeNull();
     expect(t.process(mkHealth({ name: 'A', state: 'down', statusCode: 500 }))).not.toBeNull();
     expect(t.process(mkHealth({ name: 'A', state: 'down', statusCode: 500 }))).toBeNull();
-    // Still only one open incident.
-    expect(store.listIncidents({ days: 7 })).toHaveLength(1);
+    // Still only one open incident. Pin nowMs to the test's fixture date so
+    // the rolling 7-day window doesn't drift as wall-clock time advances.
+    expect(
+      store.listIncidents({ days: 7, nowMs: Date.parse('2026-04-19T00:00:00.000Z') }),
+    ).toHaveLength(1);
     store.close();
   });
 
@@ -105,7 +108,10 @@ describe('IncidentTracker', () => {
       mkHealth({ name: 'A', state: 'down', statusCode: 500, checkedAt: '2026-04-18T00:01:00.000Z' }),
     );
     expect(evt).toBeNull();
-    expect(store.listIncidents({ days: 7 })).toHaveLength(1);
+    // Pin nowMs to the fixture date — see "ignores down->down" comment.
+    expect(
+      store.listIncidents({ days: 7, nowMs: Date.parse('2026-04-19T00:00:00.000Z') }),
+    ).toHaveLength(1);
     store.close();
   });
 

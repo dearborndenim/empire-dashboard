@@ -7,7 +7,57 @@ touched. Yellow = up but idle. Red = down. Minimal, clean, fast — a v1
 monitor that we can layer features onto (alerting, incident history,
 per-user views) as the empire grows.
 
-## Current state — 89% (2026-04-23)
+## Current state — 90% (2026-04-24)
+- Recovery banner click-through JSON endpoint:
+  * `GET /api/incidents/recovered?days=N` — companion to the `/incidents`
+    "Recovered integrations (24h)" banner. Lets external tooling (McSecretary,
+    CLI scripts) query auto-resolved integrations without scraping HTML.
+    Default `days=1`, clamped to `[1, 30]`. Optional `?app=<name>` filter.
+    Response: `{generatedAt, windowDays, count, recovered: [{integration_name,
+    opened_at, closed_at, mttr_seconds}]}` sorted by `closed_at` desc.
+    `mttr_seconds` is the closed-minus-open delta in seconds (clamped at 0).
+    Defense-in-depth filter drops rows without an `incident_end` (auto_resolved
+    should imply closed but we don't trust it).
+  * Auth: same `INCIDENTS_ADMIN_TOKEN` bearer/x-admin-token gate as
+    `POST /api/incidents/:id/note`. 503 when token is unset, 401 on mismatch.
+- Alert audit UI page:
+  * `GET /alerts/audit` — server-rendered HTML browser for the `alert_audit_log`
+    table (every fire/suppress/recovery/cooldown decision). Columns: timestamp,
+    integration, decision pill, severity, success rate %, reason. Filters via
+    query string: `?integration=<key>` (exact match), `?decision=<fire|suppress|
+    recovery|cooldown>` (derived from outcome+reason+severity), `?days=N`
+    (default 7, clamped to `[1, 30]`). Sort: newest first by `id`. Row cap: 500
+    with a "Showing N of M matching rows" footer note when truncated. Empty
+    state row when no audits match. Same `INCIDENTS_ADMIN_TOKEN` gate as the
+    JSON endpoint above.
+  * `GET /alerts/audit.csv` — same filters, downloads
+    `alert-audit-{N}d-{YYYY-MM-DD}.csv` with a stable header `id,at,
+    integration,decision,outcome,severity,success_rate,reason`. RFC-4180
+    quote-wrap on commas/quotes/newlines.
+  * Decision derivation (`deriveAlertDecision` exported from `historyStore.ts`):
+    `recovery` = outcome=fired + severity=info; `fire` = outcome=fired (other
+    severities); `cooldown` = outcome=suppressed + reason starts with
+    "cooldown"; `suppress` = outcome=suppressed (other reasons). The decision
+    filter is implemented in SQL (no post-filter) so `countAlertAudits`
+    matches `listAlertAudits` exactly.
+  * `historyStore.listAlertAudits` extended with `integration`/`days`/`nowMs`/
+    `decision` filters; new `countAlertAudits(query)` method returns total
+    matching rows for the truncation banner.
+  * New CSS: `.alert-audit__filters`, `.alert-audit__table`,
+    `.alert-audit__pill--{fire|suppress|cooldown|recovery}`,
+    `.alert-audit__truncated`.
+- Auth helpers refactored: new `requireAdminToken` (JSON 503/401) +
+  `requireAdminTokenForHtml` (HTML 503/401) helpers in `app.ts`. POST
+  `/api/incidents/:id/note` continues to use its inline token check (unchanged
+  behavior).
+- `tests/incidentTracker.test.ts`: pinned `nowMs` on two `listIncidents({days:
+  7})` calls so the rolling 7-day window doesn't drift past 2026-04-18 fixture
+  rows as wall-clock time advances. Pre-existing flake — green now.
+- 416 tests passing (up from 404, +12), 31 suites all green. New file:
+  `tests/recoveredAndAuditUI.test.ts` (12 tests). All pre-existing tests
+  untouched behavior-wise.
+
+## Prior state — 89% (2026-04-23)
 - Alert throttling polish landed on `nightly-2026-04-23-alert-and-scenedrift`:
   * `GET /api/alerts/recent?limit=N` audit endpoint backed by new
     `alert_audit_log` SQLite table (default 50, clamped [1,500], 503 when
@@ -261,6 +311,48 @@ dearborn-ai-agents, DDA-CS-Manager, diamond-pickaxe-returns-processor.
 _(none yet — newly built)_
 
 ## Build history
+### 2026-04-24 — recovered JSON endpoint + alert audit UI
+- Feature branch `nightly-2026-04-24`, merged to `main` via no-ff.
+- `historyStore.ts`: extended `AlertAuditQuery` with `integration` / `days` /
+  `nowMs` / `decision` filters; refactored `listAlertAudits` to share a SQL
+  body builder (`buildAlertAuditQuery`) with the new `countAlertAudits(query)`
+  helper (returns total matched rows for the audit page truncation banner);
+  exported `deriveAlertDecision({outcome, reason, severity})` →
+  `'fire'|'suppress'|'recovery'|'cooldown'` (recovery = fired+info;
+  cooldown = suppressed + reason starts with "cooldown"). HistoryStore
+  interface gained `countAlertAudits`; in-memory mock stores in
+  `app.test.ts` / `app.incidents.test.ts` / `app.incidentStats.test.ts` /
+  `coverage.test.ts` updated.
+- `app.ts`: new `GET /api/incidents/recovered?days=N&app=<name>` JSON
+  endpoint (default 1, clamped [1, 30], `INCIDENTS_ADMIN_TOKEN`-gated:
+  503 unset / 401 wrong); response shape
+  `{integration_name, opened_at, closed_at, mttr_seconds}` newest-first.
+  New `GET /alerts/audit` HTML page + `GET /alerts/audit.csv` (same filters,
+  same gate). New auth helpers `requireAdminToken` /
+  `requireAdminTokenForHtml` / `readAdminToken`; new `clampInt` helper used
+  by both routes; new `buildAlertAuditQueryFromReq` parser. New
+  `serializeAlertAuditCsv` + `ALERT_AUDIT_CSV_HEADER` (stable column order:
+  `id,at,integration,decision,outcome,severity,success_rate,reason`).
+- `render.ts`: new `renderAlertAuditPage(opts)` (filter form w/ select
+  options for decision + days, table w/ decision pills, truncation footer
+  when `totalMatched > rows.length`, empty-state row otherwise). Re-uses
+  `escapeHtml` + the existing `/styles.css` scaffold.
+- `public/styles.css`: `.alert-audit__*` rulesets (filters strip, table,
+  pill colors per decision, truncated footer, empty state).
+- `tests/recoveredAndAuditUI.test.ts` (NEW, 12 tests):
+  * Recovered endpoint: happy path (sort + mttr_seconds), empty result,
+    days clamp 0→1 / 999→30 / default→1, auth (503 unset / 401 missing /
+    401 wrong), `?app=` filter.
+  * Audit page: full page render, integration + decision filter, empty
+    state, days clamp 999→30 / 0→1, auth gate (503 / 401), CSV export
+    (header + decision column + RFC-4180 escaping + auth-required).
+  * Bonus unit test for `serializeAlertAuditCsv([])` empty-body behaviour.
+- `tests/incidentTracker.test.ts`: pinned `nowMs` on the two pre-existing
+  `listIncidents({days: 7})` calls that had drifted past their 2026-04-18
+  fixture date as wall-clock time advanced. Resolves a sporadic test fail.
+- Totals: 404 → 416 tests (+12), 31 suites green. No pre-existing test
+  behaviors changed.
+
 ### 2026-04-23 — alert throttling polish + scene-drift tile v2
 - Feature branch `nightly-2026-04-23-alert-and-scenedrift`, merged to `main`
 - `historyStore.ts`: new `alert_audit_log` table (one row per attempted alert

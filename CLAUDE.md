@@ -67,3 +67,18 @@ Every module has a unit test. `app.test.ts` uses supertest to hit all three
 HTTP endpoints plus the error paths. Fakes/mocks are used for `fetch` and
 Octokit so no tests hit the network. Coverage is enforced at 80% lines /
 70% branches in `package.json`.
+
+## Admin endpoints (INCIDENTS_ADMIN_TOKEN gated)
+All read/write endpoints below require the `INCIDENTS_ADMIN_TOKEN` env var
+to be set. The token is supplied by the client via the `x-admin-token`
+header (preferred) or the `Authorization: Bearer <token>` header.
+
+- `POST /api/incidents/:id/note` — append a note + optional root_cause tag.
+- `GET /api/incidents/recovered?days=N&app=<name>` — JSON list of
+  auto-resolved (recovered) integrations in the last N days (default 1,
+  clamped [1, 30]). Companion to the `/incidents` recovered banner.
+- `GET /alerts/audit?integration=&decision=&days=` — server-rendered HTML
+  browser of the `alert_audit_log` table. Decisions: fire/suppress/
+  recovery/cooldown (derived from outcome+reason+severity). Default
+  `days=7`, clamped [1, 30]. Row cap: 500 with truncation footer.
+- `GET /alerts/audit.csv` — CSV export with the same filters and auth.

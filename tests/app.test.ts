@@ -193,6 +193,7 @@ describe('collectStatuses with history', () => {
       getIntegrationCooldownOverride: jest.fn(() => null),
       recordAlertAudit: jest.fn(() => 1),
       listAlertAudits: jest.fn(() => []),
+      countAlertAudits: jest.fn(() => 0),
       close: jest.fn(),
     };
     const enriched = { ...deps, historyStore: throwingStore };

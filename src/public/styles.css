@@ -614,3 +614,121 @@ html, body {
 .recovered-banner__clear:hover {
   text-decoration: underline;
 }
+
+/* Alert audit UI (2026-04-24) */
+.alert-audit__filters {
+  margin: 16px 0 12px;
+  padding: 12px 16px;
+  background: #131618;
+  border: 1px solid #232629;
+  border-radius: 8px;
+}
+
+.alert-audit__form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+}
+
+.alert-audit__label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #9aa0a6;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.alert-audit__input,
+.alert-audit__select {
+  background: #0b0d10;
+  color: #e8eaed;
+  border: 1px solid #2c3033;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font: inherit;
+}
+
+.alert-audit__button {
+  background: #1f7ae0;
+  border: none;
+  color: white;
+  border-radius: 4px;
+  padding: 6px 14px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.alert-audit__csv {
+  margin-left: auto;
+  color: #8df0b0;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.alert-audit__csv:hover { text-decoration: underline; }
+
+.alert-audit__table-wrap {
+  overflow-x: auto;
+  border: 1px solid #232629;
+  border-radius: 8px;
+  background: #131618;
+}
+
+.alert-audit__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.alert-audit__table th,
+.alert-audit__table td {
+  padding: 8px 12px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid #20232a;
+}
+
+.alert-audit__table th {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #9aa0a6;
+  background: #181b1f;
+}
+
+.alert-audit__cell--at,
+.alert-audit__cell--rate { white-space: nowrap; }
+
+.alert-audit__cell--reason { color: #c0c4c8; max-width: 480px; word-break: break-word; }
+
+.alert-audit__pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.alert-audit__pill--fire     { background: #4a1010; color: #ff8b8b; }
+.alert-audit__pill--suppress { background: #2c2c34; color: #c2c5cb; }
+.alert-audit__pill--cooldown { background: #29331c; color: #cae0a0; }
+.alert-audit__pill--recovery { background: #112e1f; color: #8df0b0; }
+
+.alert-audit__empty {
+  text-align: center;
+  padding: 32px 8px;
+  color: #9aa0a6;
+  font-style: italic;
+}
+
+.alert-audit__truncated,
+.alert-audit__count {
+  margin: 12px 4px 0;
+  font-size: 12px;
+  color: #9aa0a6;
+}

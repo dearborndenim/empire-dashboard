@@ -184,6 +184,23 @@ export interface AlertAuditQuery {
    * Undefined returns all decisions.
    */
   decision?: 'fire' | 'suppress' | 'recovery' | 'cooldown';
+  /**
+   * Alert audit pagination (2026-04-25): skip the first N matched rows. Used
+   * by the /alerts/audit page to paginate past the per-page cap. Defaults to
+   * 0 (first page). Caller is expected to clamp to >= 0.
+   */
+  offset?: number;
+}
+
+/**
+ * Alert audit pagination (2026-04-25): one row per integration with rolling
+ * audit-volume + decision counts in a window. Powers the "Recent alert
+ * activity (Nd)" homepage tile.
+ */
+export interface AlertActivitySummaryRow {
+  integration_name: string;
+  total: number;
+  fire_count: number;
 }
 
 /**
@@ -313,10 +330,20 @@ export interface HistoryStore {
   listAlertAudits(query?: AlertAuditQuery): AlertAuditRow[];
   /**
    * Alert audit UI (2026-04-24): count rows matching `query` (excluding
-   * `limit`). Used by the /alerts/audit page to render a "more rows exist"
-   * footer when the result was truncated.
+   * `limit` and `offset`). Used by the /alerts/audit page to render the
+   * total-rows footer + pagination "Page X of Y" math.
    */
   countAlertAudits(query?: AlertAuditQuery): number;
+  /**
+   * Alert audit pagination (2026-04-25): per-integration summary of audit
+   * volume in the last N days, sorted by total desc. `limit` clamped [1, 50]
+   * (default 5). Powers the homepage "Recent alert activity" tile.
+   */
+  alertActivitySummary(query?: {
+    days?: number;
+    limit?: number;
+    nowMs?: number;
+  }): AlertActivitySummaryRow[];
   close(): void;
 }
 
@@ -1038,10 +1065,15 @@ export class SqliteHistoryStore implements HistoryStore {
   /** Most-recent N audit rows ordered newest-first. */
   listAlertAudits(query: AlertAuditQuery = {}): AlertAuditRow[] {
     const limit = Math.max(1, Math.min(500, query.limit ?? 50));
+    // Alert audit pagination (2026-04-25): clamp offset to >= 0. Negative,
+    // NaN, and non-finite values fall back to 0 to preserve "first page"
+    // behaviour for callers that omit the field entirely.
+    const rawOffset = typeof query.offset === 'number' ? query.offset : 0;
+    const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? Math.floor(rawOffset) : 0;
     const { sql, params } = this.buildAlertAuditQuery(query);
     return this.db
-      .prepare(`${sql} ORDER BY id DESC LIMIT ?`)
-      .all(...params, limit) as AlertAuditRow[];
+      .prepare(`${sql} ORDER BY id DESC LIMIT ? OFFSET ?`)
+      .all(...params, limit, offset) as AlertAuditRow[];
   }
 
   /**
@@ -1058,6 +1090,34 @@ export class SqliteHistoryStore implements HistoryStore {
     );
     const row = this.db.prepare(countSql).get(...params) as { c: number };
     return row?.c ?? 0;
+  }
+
+  /**
+   * Alert audit pagination (2026-04-25): per-integration audit-volume +
+   * decision summary in the last N days. `fire_count` includes recovery
+   * rows since they share the `outcome=fired` bucket — the homepage tile
+   * then promotes itself to warn when any integration has fire_count > 0.
+   */
+  alertActivitySummary(
+    query: { days?: number; limit?: number; nowMs?: number } = {},
+  ): AlertActivitySummaryRow[] {
+    const limit = Math.max(1, Math.min(50, query.limit ?? 5));
+    const days = typeof query.days === 'number' && Number.isFinite(query.days) && query.days > 0
+      ? query.days
+      : 7;
+    const since = new Date((query.nowMs ?? this.now()) - days * 86400_000).toISOString();
+    return this.db
+      .prepare(
+        `SELECT integration_name,
+                COUNT(*) AS total,
+                SUM(CASE WHEN outcome = 'fired' THEN 1 ELSE 0 END) AS fire_count
+         FROM alert_audit_log
+         WHERE at >= ?
+         GROUP BY integration_name
+         ORDER BY total DESC, integration_name ASC
+         LIMIT ?`,
+      )
+      .all(since, limit) as AlertActivitySummaryRow[];
   }
 
   /**

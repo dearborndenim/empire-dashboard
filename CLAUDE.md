@@ -77,8 +77,16 @@ header (preferred) or the `Authorization: Bearer <token>` header.
 - `GET /api/incidents/recovered?days=N&app=<name>` — JSON list of
   auto-resolved (recovered) integrations in the last N days (default 1,
   clamped [1, 30]). Companion to the `/incidents` recovered banner.
-- `GET /alerts/audit?integration=&decision=&days=` — server-rendered HTML
-  browser of the `alert_audit_log` table. Decisions: fire/suppress/
+- `GET /alerts/audit?integration=&decision=&days=&offset=` — server-rendered
+  HTML browser of the `alert_audit_log` table. Decisions: fire/suppress/
   recovery/cooldown (derived from outcome+reason+severity). Default
-  `days=7`, clamped [1, 30]. Row cap: 500 with truncation footer.
-- `GET /alerts/audit.csv` — CSV export with the same filters and auth.
+  `days=7`, clamped [1, 30]. Page size: 100 rows. Pagination via `?offset=N`
+  (clamped [0, 1_000_000]) with Prev/Next links that preserve all filter
+  params. Footer renders "Page X of Y, showing rows A-B of N" when total
+  exceeds page size.
+- `GET /alerts/audit.csv` — CSV export with the same filters + offset and
+  auth as the HTML page.
+
+The homepage (`/`) also renders a "Recent alert activity (7d)" tile listing
+top-5 integrations by audit volume, click-through to `/alerts/audit`, with
+state=warn whenever any integration had a fire decision in the window.

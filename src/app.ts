@@ -316,7 +316,14 @@ function clampInt(
 /**
  * Parse the alert-audit filter query string off a request. Centralised so
  * the page route, CSV route, and tests build the exact same shape.
+ *
+ * Alert audit pagination (2026-04-25): also parses `offset`. We allow large
+ * offsets here (up to 1_000_000) so callers can jump deep into long alert
+ * histories — the page itself still caps `limit` at the per-page size, so
+ * walking past the end just yields an empty page (rendered with a notice).
  */
+export const ALERT_AUDIT_PAGE_SIZE = 100;
+
 function buildAlertAuditQueryFromReq(req: Request): AlertAuditQuery {
   const integration = typeof req.query.integration === 'string' ? req.query.integration.trim() : '';
   const decisionRaw = typeof req.query.decision === 'string' ? req.query.decision.trim() : '';
@@ -326,9 +333,11 @@ function buildAlertAuditQueryFromReq(req: Request): AlertAuditQuery {
       ? (decisionRaw as AlertAuditQuery['decision'])
       : undefined;
   const days = clampInt(req.query.days, { defaultValue: 7, min: 1, max: 30 });
+  const offset = clampInt(req.query.offset, { defaultValue: 0, min: 0, max: 1_000_000 });
   const query: AlertAuditQuery = { days };
   if (integration) query.integration = integration;
   if (decision) query.decision = decision;
+  if (offset > 0) query.offset = offset;
   return query;
 }
 
@@ -667,7 +676,12 @@ export function createApp(deps: AppDeps): Express {
       }
       if (!requireAdminTokenForHtml(req, res, deps.incidentsAdminToken)) return;
       const query = buildAlertAuditQueryFromReq(req);
-      const rows = deps.historyStore.listAlertAudits({ ...query, limit: 500 });
+      const offset = query.offset ?? 0;
+      const rows = deps.historyStore.listAlertAudits({
+        ...query,
+        limit: ALERT_AUDIT_PAGE_SIZE,
+        offset,
+      });
       const totalMatched = deps.historyStore.countAlertAudits(query);
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(
@@ -675,7 +689,8 @@ export function createApp(deps: AppDeps): Express {
           generatedAt: new Date().toISOString(),
           rows,
           totalMatched,
-          rowLimit: 500,
+          rowLimit: ALERT_AUDIT_PAGE_SIZE,
+          offset,
           filters: {
             integration: query.integration ?? '',
             decision: query.decision ?? '',
@@ -699,7 +714,12 @@ export function createApp(deps: AppDeps): Express {
       }
       if (!requireAdminToken(req, res, deps.incidentsAdminToken)) return;
       const query = buildAlertAuditQueryFromReq(req);
-      const rows = deps.historyStore.listAlertAudits({ ...query, limit: 500 });
+      const offset = query.offset ?? 0;
+      const rows = deps.historyStore.listAlertAudits({
+        ...query,
+        limit: ALERT_AUDIT_PAGE_SIZE,
+        offset,
+      });
       const csv = serializeAlertAuditCsv(rows);
       const filename = `alert-audit-${query.days ?? 7}d-${new Date()
         .toISOString()
@@ -837,12 +857,27 @@ export function createApp(deps: AppDeps): Express {
           console.error('[empire-dashboard] prune-run read failed:', err);
         }
       }
+      let recentAlertActivity:
+        | Array<{ integration_name: string; total: number; fire_count: number }>
+        | undefined;
+      if (deps.historyStore) {
+        try {
+          recentAlertActivity = deps.historyStore.alertActivitySummary({
+            days: 7,
+            limit: 5,
+          });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error('[empire-dashboard] alertActivitySummary read failed:', err);
+        }
+      }
       const html = renderDashboard(statuses, {
         generatedAt: new Date().toISOString(),
         recentIncidents,
         integrationTiles,
         latestPruneRun,
         topRootCauses,
+        recentAlertActivity,
       });
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(html);

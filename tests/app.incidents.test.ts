@@ -152,6 +152,7 @@ describe('GET /api/incidents', () => {
       recordAlertAudit: jest.fn(() => 1),
       listAlertAudits: jest.fn(() => []),
       countAlertAudits: jest.fn(() => 0),
+      alertActivitySummary: jest.fn(() => []),
       close: jest.fn(),
     };
     const app = createApp({ ...deps, historyStore: broken });
@@ -252,6 +253,7 @@ describe('GET / with recent incidents', () => {
       recordAlertAudit: jest.fn(() => 1),
       listAlertAudits: jest.fn(() => []),
       countAlertAudits: jest.fn(() => 0),
+      alertActivitySummary: jest.fn(() => []),
       close: jest.fn(),
     };
     const app = createApp({ ...deps, historyStore: broken });

@@ -34,6 +34,16 @@ export interface RenderTopRootCause {
   count: number;
 }
 
+/**
+ * Alert audit pagination (2026-04-25): one row in the homepage "Recent alert
+ * activity" tile. Pulled directly from `historyStore.alertActivitySummary`.
+ */
+export interface RenderRecentAlertActivityRow {
+  integration_name: string;
+  total: number;
+  fire_count: number;
+}
+
 export interface RenderPruneRun {
   ranAt: string;
   deletedCount: number;
@@ -54,6 +64,13 @@ export interface RenderOptions {
    * undefined/empty the widget is omitted.
    */
   topRootCauses?: RenderTopRootCause[];
+  /**
+   * Alert audit pagination (2026-04-25): per-integration rolling alert audit
+   * volume + decision counts. Drives the "Recent alert activity (7d)"
+   * homepage tile. Undefined/empty omits the tile body in favour of the
+   * "no alert activity" empty state. Cap to 5 rows at the call site.
+   */
+  recentAlertActivity?: RenderRecentAlertActivityRow[];
 }
 
 export function formatIncidentDuration(minutes: number | null, open: boolean): string {
@@ -150,6 +167,58 @@ function renderIncidentsPanel(
     <ul class="incidents__list">
 ${rows}
     </ul>
+  </section>`;
+}
+
+/**
+ * Alert audit pagination (2026-04-25): server-rendered "Recent alert activity
+ * (7d)" tile on the homepage. Each row is a click-through into
+ * `/alerts/audit?integration=<name>&days=7`. State logic:
+ *   - `ok`   when `rows` is undefined/empty (no alert traffic, no badge).
+ *   - `warn` when any row has `fire_count > 0` (a real alert fired in the
+ *     window, regardless of how many recoveries / suppressions joined it).
+ * Capped to top 5 rows at render time so the tile stays compact.
+ */
+export function renderRecentAlertActivityTile(
+  rows: RenderRecentAlertActivityRow[] | undefined,
+): string {
+  const list = (rows ?? []).slice(0, 5);
+  if (list.length === 0) {
+    return `<section class="recent-alert-activity recent-alert-activity--ok" aria-label="Recent alert activity (7d)">
+      <div class="recent-alert-activity__head">
+        <h2 class="recent-alert-activity__title">Recent alert activity (7d)</h2>
+        <span class="recent-alert-activity__state recent-alert-activity__state--ok">ok</span>
+      </div>
+      <div class="recent-alert-activity__empty">No alert activity in the last 7 days.</div>
+    </section>`;
+  }
+  const anyFires = list.some((r) => r.fire_count > 0);
+  const tileState = anyFires ? 'warn' : 'ok';
+  const totalFires = list.reduce((acc, r) => acc + (r.fire_count > 0 ? r.fire_count : 0), 0);
+  const stateBadge = anyFires
+    ? `<span class="recent-alert-activity__state recent-alert-activity__state--warn" title="${totalFires} fire decision${totalFires === 1 ? '' : 's'} in the window">warn</span>`
+    : `<span class="recent-alert-activity__state recent-alert-activity__state--ok">ok</span>`;
+  const items = list
+    .map((r) => {
+      const name = escapeHtml(r.integration_name);
+      const total = Number.isFinite(r.total) && r.total >= 0 ? r.total : 0;
+      const fires = Number.isFinite(r.fire_count) && r.fire_count >= 0 ? r.fire_count : 0;
+      const href = `/alerts/audit?integration=${encodeURIComponent(r.integration_name)}&days=7`;
+      const badgeClass = fires > 0
+        ? 'recent-alert-activity__badge recent-alert-activity__badge--fire'
+        : 'recent-alert-activity__badge recent-alert-activity__badge--quiet';
+      return `<li class="recent-alert-activity__item">
+        <a class="recent-alert-activity__link" href="${escapeHtml(href)}">${name}</a>
+        <span class="${badgeClass}">${total} audit${total === 1 ? '' : 's'}${fires > 0 ? ` · ${fires} fire${fires === 1 ? '' : 's'}` : ''}</span>
+      </li>`;
+    })
+    .join('');
+  return `<section class="recent-alert-activity recent-alert-activity--${tileState}" aria-label="Recent alert activity (7d)">
+    <div class="recent-alert-activity__head">
+      <h2 class="recent-alert-activity__title">Recent alert activity (7d)</h2>
+      ${stateBadge}
+    </div>
+    <ul class="recent-alert-activity__list">${items}</ul>
   </section>`;
 }
 
@@ -458,10 +527,16 @@ ${cards}
 export interface RenderAlertAuditPageOptions {
   generatedAt: string;
   rows: AlertAuditRow[];
-  /** Total rows matching the active filters, ignoring `rowLimit`. */
+  /** Total rows matching the active filters, ignoring `rowLimit`/`offset`. */
   totalMatched: number;
-  /** Cap applied to `rows.length`. Default 500. */
+  /** Page size cap applied to `rows.length`. */
   rowLimit: number;
+  /**
+   * Alert audit pagination (2026-04-25): zero-based row offset for the
+   * current page (rows previously skipped). Defaults to 0 when omitted so
+   * pre-pagination callers continue to render page 1.
+   */
+  offset?: number;
   /** Currently-active filter values (used to populate the filter form). */
   filters: {
     integration: string;
@@ -470,8 +545,30 @@ export interface RenderAlertAuditPageOptions {
   };
 }
 
+/**
+ * Alert audit pagination (2026-04-25): build the query string preserving
+ * the active filters, swapping in a fresh `offset`. Exported for tests.
+ */
+export function buildAlertAuditPageHref(
+  filters: { integration: string; decision: string; days: number },
+  offset: number,
+): string {
+  const parts: string[] = [`days=${encodeURIComponent(String(filters.days))}`];
+  if (filters.integration) {
+    parts.push(`integration=${encodeURIComponent(filters.integration)}`);
+  }
+  if (filters.decision) {
+    parts.push(`decision=${encodeURIComponent(filters.decision)}`);
+  }
+  if (offset > 0) {
+    parts.push(`offset=${offset}`);
+  }
+  return `/alerts/audit?${parts.join('&')}`;
+}
+
 export function renderAlertAuditPage(opts: RenderAlertAuditPageOptions): string {
   const { rows, totalMatched, rowLimit, filters } = opts;
+  const offset = typeof opts.offset === 'number' && opts.offset > 0 ? Math.floor(opts.offset) : 0;
   const rowsHtml = rows.length === 0
     ? `<tr><td colspan="6" class="alert-audit__empty">No alert audit rows match the current filters.</td></tr>`
     : rows
@@ -492,10 +589,43 @@ export function renderAlertAuditPage(opts: RenderAlertAuditPageOptions): string 
         })
         .join('\n');
 
-  const truncated = totalMatched > rows.length;
-  const footerNote = truncated
-    ? `<p class="alert-audit__truncated">Showing ${rows.length} of ${totalMatched} matching rows (capped at ${rowLimit}). Tighten the filters to see older rows.</p>`
-    : `<p class="alert-audit__count">${rows.length} row${rows.length === 1 ? '' : 's'} matched.</p>`;
+  // Pagination math. Page size = rowLimit. Page 1 has offset=0.
+  const pageSize = rowLimit > 0 ? rowLimit : 1;
+  const totalPages = totalMatched <= 0 ? 1 : Math.max(1, Math.ceil(totalMatched / pageSize));
+  const currentPage = Math.min(totalPages, Math.floor(offset / pageSize) + 1);
+  const firstRowOnPage = rows.length === 0 ? 0 : offset + 1;
+  const lastRowOnPage = rows.length === 0 ? 0 : offset + rows.length;
+  const hasPrev = offset > 0;
+  const hasNext = offset + rows.length < totalMatched;
+  const prevHref = buildAlertAuditPageHref(filters, Math.max(0, offset - pageSize));
+  const nextHref = buildAlertAuditPageHref(filters, offset + pageSize);
+
+  let footerNote: string;
+  if (rows.length === 0) {
+    footerNote = totalMatched === 0
+      ? `<p class="alert-audit__count">0 rows matched.</p>`
+      : `<p class="alert-audit__count">No rows on this page (offset ${offset} of ${totalMatched} total).</p>`;
+  } else if (totalMatched > pageSize) {
+    footerNote = `<p class="alert-audit__count">Page ${currentPage} of ${totalPages}, showing rows ${firstRowOnPage}-${lastRowOnPage} of ${totalMatched}.</p>`;
+  } else {
+    footerNote = `<p class="alert-audit__count">${rows.length} row${rows.length === 1 ? '' : 's'} matched.</p>`;
+  }
+
+  const paginationHtml = totalMatched > pageSize
+    ? `<nav class="alert-audit__pagination" aria-label="Alert audit pagination">
+        ${
+          hasPrev
+            ? `<a class="alert-audit__page alert-audit__page--prev" href="${escapeHtml(prevHref)}" rel="prev">&larr; Prev</a>`
+            : `<span class="alert-audit__page alert-audit__page--disabled" aria-disabled="true">&larr; Prev</span>`
+        }
+        <span class="alert-audit__page-indicator">Page ${currentPage} of ${totalPages}</span>
+        ${
+          hasNext
+            ? `<a class="alert-audit__page alert-audit__page--next" href="${escapeHtml(nextHref)}" rel="next">Next &rarr;</a>`
+            : `<span class="alert-audit__page alert-audit__page--disabled" aria-disabled="true">Next &rarr;</span>`
+        }
+      </nav>`
+    : '';
 
   const decisionOptions = ['', 'fire', 'suppress', 'recovery', 'cooldown']
     .map((d) => {
@@ -566,6 +696,7 @@ export function renderAlertAuditPage(opts: RenderAlertAuditPageOptions): string 
 ${rowsHtml}
         </tbody>
       </table>
+      ${paginationHtml}
       ${footerNote}
     </section>
     <footer class="foot">
@@ -638,6 +769,7 @@ export function renderDashboard(statuses: AppStatus[], opts: RenderOptions): str
 ${cards}
     </section>
     ${renderIntegrationTiles(opts.integrationTiles)}
+    ${renderRecentAlertActivityTile(opts.recentAlertActivity)}
     ${renderTopRootCausesWidget(opts.topRootCauses)}
     ${renderIncidentsPanel(opts.recentIncidents)}
     <footer class="foot">

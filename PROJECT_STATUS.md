@@ -7,7 +7,78 @@ touched. Yellow = up but idle. Red = down. Minimal, clean, fast — a v1
 monitor that we can layer features onto (alerting, incident history,
 per-user views) as the empire grows.
 
-## Current state — 90% (2026-04-24)
+## Current state — 91% (2026-04-25)
+- Alert audit UI polish — pagination + homepage activity tile:
+  * `/alerts/audit` + `/alerts/audit.csv` now paginate via `?offset=N`. The
+    per-page cap dropped from 500 → **100** rows for nicer UX (constant
+    `ALERT_AUDIT_PAGE_SIZE` exported from `app.ts`). Footer renders
+    `Page X of Y, showing rows A-B of N` when totalMatched exceeds page
+    size, the prior `N rows matched` line otherwise. Past-end offsets
+    (e.g. `?offset=500` against 240 rows) render `No rows on this page
+    (offset 500 of 240 total)` instead of an empty body.
+  * `<nav class="alert-audit__pagination">` Prev/Next links beneath the
+    table. Disabled (`aria-disabled="true"`) on the first/last page.
+    Filters (`integration`, `decision`, `days`) preserved across both
+    Prev/Next via a centralised `buildAlertAuditPageHref(filters, offset)`
+    helper exported from `render.ts`. The `offset=0` page omits the offset
+    param from the URL so page-1 links stay clean.
+  * `historyStore.listAlertAudits` extended with `offset?: number` (clamped
+    to ≥0, NaN/negative falls back to 0). `countAlertAudits` ignores both
+    `limit` and `offset` so the "Page X of Y" math is exact.
+  * `app.ts` `buildAlertAuditQueryFromReq` parses `?offset` via the same
+    `clampInt` helper as `?days` (default 0, clamped [0, 1_000_000]).
+  * Pagination nav is fully omitted (zero markup) when totalMatched ≤
+    pageSize so quiet weeks render byte-identically pre-feature.
+- Homepage "Recent alert activity (7d)" tile (5 PM-ish on the dashboard,
+  rendered between integration tiles and top-root-causes widget):
+  * Server-rendered list of top-5 integrations by audit volume in the last
+    7 days. Each row is a click-through to
+    `/alerts/audit?integration=<name>&days=7` for instant drill-down.
+  * State logic: `ok` when no audits in the window OR all rows have
+    `fire_count=0` (only suppressed/cooldown traffic); `warn` when **any**
+    row carries `fire_count > 0` (a real fire decision occurred). State
+    pill on the tile head + tile-level `--warn`/`--ok` modifier class on
+    the section.
+  * Per-row badge shows `N audits` (quiet) or `N audits · M fires` (red
+    background) so the eye snaps to the hot integrations first.
+  * New helper `historyStore.alertActivitySummary({ days, limit, nowMs })`
+    runs a single GROUP BY over `alert_audit_log`. Limit clamped [1, 50],
+    default 5; days defaults to 7. Reuses the same window math as the
+    audit page.
+  * New `renderRecentAlertActivityTile(rows)` exported from `render.ts`
+    (XSS-safe via `escapeHtml`, top-5 cap enforced even if caller passes
+    more rows). Empty state renders an italic "No alert activity in the
+    last 7 days" with the ok pill so the tile is always present (no
+    layout shift).
+- HistoryStore interface gained one new method (`alertActivitySummary`); the
+  4 in-memory mock stores in `app.test.ts` / `app.incidents.test.ts` /
+  `app.incidentStats.test.ts` / `coverage.test.ts` were updated. No
+  pre-existing test behavior changed.
+- New CSS rulesets: `.alert-audit__pagination`, `.alert-audit__page`
+  (+`--prev`/`--next`/`--disabled` modifiers), `.alert-audit__page-indicator`,
+  `.recent-alert-activity` (+`--ok`/`--warn` modifiers),
+  `.recent-alert-activity__head|title|state|list|item|link|badge|empty`.
+- `tests/alertAuditPagination.test.ts` (NEW, 12 tests):
+  * Pagination boundary cases: page 1 (offset=0), page 2 (offset=100),
+    last page (partial rows), past-end (offset=500 against 240 rows).
+  * Pagination omitted when totalMatched ≤ pageSize.
+  * Negative + garbage offsets clamp to 0.
+  * Filter persistence in Prev/Next hrefs (integration + decision + days).
+  * `buildAlertAuditPageHref` deterministic shape including URL-escape of
+    special chars in integration name.
+  * Homepage tile: empty-state ok render, top-5 cap (6 integrations
+    seeded → 6th omitted), warn-state when fires present, click-through
+    URLs verified for all 5 rows.
+  * State transition unit: ok ↔ warn flip on `fire_count > 0`; ok when
+    rows undefined / empty / all-zeros; XSS escape guard on integration
+    name.
+  * `alertActivitySummary` direct unit: per-integration sort by total
+    desc, fire_count derived from outcome, 7-day window cutoff,
+    limit clamp.
+- 416 → 428 tests passing (+12), 32 suites all green. Coverage holds at
+  ~98% statements / 89% branches / 98% lines.
+
+## Prior state — 90% (2026-04-24)
 - Recovery banner click-through JSON endpoint:
   * `GET /api/incidents/recovered?days=N` — companion to the `/incidents`
     "Recovered integrations (24h)" banner. Lets external tooling (McSecretary,

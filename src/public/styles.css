@@ -732,3 +732,93 @@ html, body {
   font-size: 12px;
   color: #9aa0a6;
 }
+
+/* Alert audit pagination (2026-04-25) */
+.alert-audit__pagination {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 4px 0;
+  font-size: 13px;
+}
+.alert-audit__page {
+  padding: 6px 12px;
+  border-radius: 6px;
+  text-decoration: none;
+  background: #1f2230;
+  color: #d2d6dc;
+  border: 1px solid #2c2f3a;
+}
+.alert-audit__page:hover { background: #272a36; }
+.alert-audit__page--disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.alert-audit__page-indicator {
+  color: #9aa0a6;
+  font-size: 12px;
+}
+
+/* Recent alert activity (7d) homepage tile */
+.recent-alert-activity {
+  margin: 16px 0;
+  padding: 16px;
+  background: #1a1d27;
+  border: 1px solid #2c2f3a;
+  border-radius: 8px;
+}
+.recent-alert-activity--warn {
+  border-color: #5a4a1f;
+  background: #1f1c14;
+}
+.recent-alert-activity__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.recent-alert-activity__title {
+  margin: 0;
+  font-size: 14px;
+  color: #d2d6dc;
+}
+.recent-alert-activity__state {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.recent-alert-activity__state--ok { background: #112e1f; color: #8df0b0; }
+.recent-alert-activity__state--warn { background: #3b2f15; color: #f0c987; }
+.recent-alert-activity__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.recent-alert-activity__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-top: 1px solid #2c2f3a;
+}
+.recent-alert-activity__item:first-child { border-top: 0; }
+.recent-alert-activity__link {
+  color: #c5c8cd;
+  text-decoration: none;
+}
+.recent-alert-activity__link:hover { color: #fff; text-decoration: underline; }
+.recent-alert-activity__badge {
+  font-size: 12px;
+  color: #9aa0a6;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: #1f2230;
+}
+.recent-alert-activity__badge--fire { background: #3b1f1f; color: #f0a087; }
+.recent-alert-activity__empty {
+  font-size: 13px;
+  color: #9aa0a6;
+  font-style: italic;
+}

@@ -194,6 +194,7 @@ describe('collectStatuses with history', () => {
       recordAlertAudit: jest.fn(() => 1),
       listAlertAudits: jest.fn(() => []),
       countAlertAudits: jest.fn(() => 0),
+      alertActivitySummary: jest.fn(() => []),
       close: jest.fn(),
     };
     const enriched = { ...deps, historyStore: throwingStore };

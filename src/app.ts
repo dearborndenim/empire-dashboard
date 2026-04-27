@@ -217,6 +217,7 @@ export const ALERT_AUDIT_CSV_HEADER = [
   'outcome',
   'severity',
   'success_rate',
+  'actor',
   'reason',
 ].join(',');
 
@@ -233,6 +234,7 @@ export function serializeAlertAuditCsv(rows: AlertAuditRow[]): string {
         csvCell(r.outcome),
         csvCell(r.severity ?? ''),
         csvCell(r.success_rate ?? ''),
+        csvCell(r.actor ?? ''),
         csvCell(r.reason ?? ''),
       ].join(','),
     );
@@ -334,10 +336,15 @@ function buildAlertAuditQueryFromReq(req: Request): AlertAuditQuery {
       : undefined;
   const days = clampInt(req.query.days, { defaultValue: 7, min: 1, max: 30 });
   const offset = clampInt(req.query.offset, { defaultValue: 0, min: 0, max: 1_000_000 });
+  // Alert audit polish 2 (2026-04-26): exact-match actor filter. Cap at 64
+  // chars to match the column write-side cap.
+  const actorRaw = typeof req.query.actor === 'string' ? req.query.actor.trim() : '';
+  const actor = actorRaw.slice(0, 64);
   const query: AlertAuditQuery = { days };
   if (integration) query.integration = integration;
   if (decision) query.decision = decision;
   if (offset > 0) query.offset = offset;
+  if (actor) query.actor = actor;
   return query;
 }
 
@@ -695,6 +702,7 @@ export function createApp(deps: AppDeps): Express {
             integration: query.integration ?? '',
             decision: query.decision ?? '',
             days: query.days ?? 7,
+            actor: query.actor ?? '',
           },
         }),
       );

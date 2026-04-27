@@ -719,6 +719,56 @@ html, body {
 .alert-audit__pill--cooldown { background: #29331c; color: #cae0a0; }
 .alert-audit__pill--recovery { background: #112e1f; color: #8df0b0; }
 
+/* Alert audit polish 2 (2026-04-26): per-decision row colour bands. Subtle
+   left border + faint background tint so the eye snaps to the hot rows
+   without overwhelming the dark theme. WCAG-AA compliant against the page
+   background (#131618). */
+.alert-audit__row--fire     td { background: rgba(184, 36, 36, 0.10); border-left: 3px solid #b82424; }
+.alert-audit__row--suppress td { background: rgba(120, 124, 134, 0.07); border-left: 3px solid #6c7079; }
+.alert-audit__row--recovery td { background: rgba(38, 168, 88, 0.10); border-left: 3px solid #26a858; }
+.alert-audit__row--cooldown td { background: rgba(212, 168, 30, 0.10); border-left: 3px solid #d4a81e; }
+.alert-audit__row--fire     td:first-child,
+.alert-audit__row--suppress td:first-child,
+.alert-audit__row--recovery td:first-child,
+.alert-audit__row--cooldown td:first-child {
+  /* Strip the table cell's default left padding so the coloured border sits
+     flush; row-level border-left can't be set on <tr> in collapsed tables. */
+  padding-left: 9px;
+}
+
+.alert-audit__cell--actor-empty { color: #5f656d; }
+
+/* Legend strip above the table — explains the row colour code. */
+.alert-audit__legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0 4px 12px;
+  font-size: 12px;
+  color: #9aa0a6;
+}
+.alert-audit__legend-label {
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.alert-audit__legend-swatch {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 11px;
+  border-left-width: 3px;
+  border-left-style: solid;
+}
+.alert-audit__legend-swatch--fire     { background: rgba(184, 36, 36, 0.12); color: #ff8b8b; border-left-color: #b82424; }
+.alert-audit__legend-swatch--suppress { background: rgba(120, 124, 134, 0.10); color: #c2c5cb; border-left-color: #6c7079; }
+.alert-audit__legend-swatch--recovery { background: rgba(38, 168, 88, 0.12); color: #8df0b0; border-left-color: #26a858; }
+.alert-audit__legend-swatch--cooldown { background: rgba(212, 168, 30, 0.12); color: #cae0a0; border-left-color: #d4a81e; }
+
 .alert-audit__empty {
   text-align: center;
   padding: 32px 8px;

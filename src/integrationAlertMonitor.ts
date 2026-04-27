@@ -420,11 +420,15 @@ export class IntegrationAlertMonitor {
     reason: string;
     severity: string | null;
     success_rate: number | null;
+    actor?: string | null;
   }): void {
     const fn = this.store.recordAlertAudit;
     if (typeof fn !== 'function') return;
     try {
-      this.store.recordAlertAudit(row);
+      // Alert audit polish 2 (2026-04-26): tag every monitor-driven audit row
+      // with actor="monitor" so the /alerts/audit UI actor filter works
+      // out-of-the-box for the dominant audit-row source.
+      this.store.recordAlertAudit({ actor: 'monitor', ...row });
     } catch (err) {
       this.logger.error(
         `[empire-dashboard] alert audit write failed for ${row.integration_name}:`,

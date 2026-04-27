@@ -542,6 +542,11 @@ export interface RenderAlertAuditPageOptions {
     integration: string;
     decision: string;
     days: number;
+    /**
+     * Alert audit polish 2 (2026-04-26): exact-match actor filter. Empty
+     * string means "all actors".
+     */
+    actor?: string;
   };
 }
 
@@ -550,7 +555,7 @@ export interface RenderAlertAuditPageOptions {
  * the active filters, swapping in a fresh `offset`. Exported for tests.
  */
 export function buildAlertAuditPageHref(
-  filters: { integration: string; decision: string; days: number },
+  filters: { integration: string; decision: string; days: number; actor?: string },
   offset: number,
 ): string {
   const parts: string[] = [`days=${encodeURIComponent(String(filters.days))}`];
@@ -559,6 +564,10 @@ export function buildAlertAuditPageHref(
   }
   if (filters.decision) {
     parts.push(`decision=${encodeURIComponent(filters.decision)}`);
+  }
+  // Alert audit polish 2 (2026-04-26): preserve actor across paginated nav.
+  if (filters.actor) {
+    parts.push(`actor=${encodeURIComponent(filters.actor)}`);
   }
   if (offset > 0) {
     parts.push(`offset=${offset}`);
@@ -569,13 +578,18 @@ export function buildAlertAuditPageHref(
 export function renderAlertAuditPage(opts: RenderAlertAuditPageOptions): string {
   const { rows, totalMatched, rowLimit, filters } = opts;
   const offset = typeof opts.offset === 'number' && opts.offset > 0 ? Math.floor(opts.offset) : 0;
+  // Alert audit polish 2 (2026-04-26): row colspan grew from 6 → 7 with the
+  // new actor column. Per-decision colour bands are CSS-only — every row
+  // already carries an `alert-audit__row--{decision}` modifier class which
+  // styles.css now tints with a subtle background.
   const rowsHtml = rows.length === 0
-    ? `<tr><td colspan="6" class="alert-audit__empty">No alert audit rows match the current filters.</td></tr>`
+    ? `<tr><td colspan="7" class="alert-audit__empty">No alert audit rows match the current filters.</td></tr>`
     : rows
         .map((r) => {
           const decision = deriveAlertDecision(r);
           const reason = r.reason ?? '';
           const severity = r.severity ?? '';
+          const actor = r.actor ?? '';
           return `<tr class="alert-audit__row alert-audit__row--${decision}">
             <td class="alert-audit__cell alert-audit__cell--at">${escapeHtml(r.at)}</td>
             <td class="alert-audit__cell alert-audit__cell--integration">${escapeHtml(r.integration_name)}</td>
@@ -584,6 +598,7 @@ export function renderAlertAuditPage(opts: RenderAlertAuditPageOptions): string 
             </td>
             <td class="alert-audit__cell alert-audit__cell--severity">${escapeHtml(severity)}</td>
             <td class="alert-audit__cell alert-audit__cell--rate">${r.success_rate === null || r.success_rate === undefined ? '' : escapeHtml((r.success_rate * 100).toFixed(1) + '%')}</td>
+            <td class="alert-audit__cell alert-audit__cell--actor">${actor ? escapeHtml(actor) : '<span class="alert-audit__cell--actor-empty">&mdash;</span>'}</td>
             <td class="alert-audit__cell alert-audit__cell--reason">${escapeHtml(reason)}</td>
           </tr>`;
         })
@@ -597,8 +612,9 @@ export function renderAlertAuditPage(opts: RenderAlertAuditPageOptions): string 
   const lastRowOnPage = rows.length === 0 ? 0 : offset + rows.length;
   const hasPrev = offset > 0;
   const hasNext = offset + rows.length < totalMatched;
-  const prevHref = buildAlertAuditPageHref(filters, Math.max(0, offset - pageSize));
-  const nextHref = buildAlertAuditPageHref(filters, offset + pageSize);
+  const filtersWithActor = { ...filters, actor: filters.actor ?? '' };
+  const prevHref = buildAlertAuditPageHref(filtersWithActor, Math.max(0, offset - pageSize));
+  const nextHref = buildAlertAuditPageHref(filtersWithActor, offset + pageSize);
 
   let footerNote: string;
   if (rows.length === 0) {
@@ -637,7 +653,9 @@ export function renderAlertAuditPage(opts: RenderAlertAuditPageOptions): string 
 
   const csvHref = `/alerts/audit.csv?days=${encodeURIComponent(String(filters.days))}${
     filters.integration ? `&integration=${encodeURIComponent(filters.integration)}` : ''
-  }${filters.decision ? `&decision=${encodeURIComponent(filters.decision)}` : ''}`;
+  }${filters.decision ? `&decision=${encodeURIComponent(filters.decision)}` : ''}${
+    filters.actor ? `&actor=${encodeURIComponent(filters.actor)}` : ''
+  }`;
 
   return `<!doctype html>
 <html lang="en">
@@ -666,6 +684,10 @@ export function renderAlertAuditPage(opts: RenderAlertAuditPageOptions): string 
           </select>
         </label>
         <label class="alert-audit__label">
+          Actor
+          <input class="alert-audit__input" type="text" name="actor" value="${escapeHtml(filters.actor ?? '')}" placeholder="(all)" maxlength="64" />
+        </label>
+        <label class="alert-audit__label">
           Last
           <select class="alert-audit__select" name="days">
             ${[1, 7, 14, 30]
@@ -680,6 +702,13 @@ export function renderAlertAuditPage(opts: RenderAlertAuditPageOptions): string 
         <a class="alert-audit__csv" href="${escapeHtml(csvHref)}">Download CSV</a>
       </form>
     </section>
+    <section class="alert-audit__legend" aria-label="Decision legend">
+      <span class="alert-audit__legend-label">Decision colour bands:</span>
+      <span class="alert-audit__legend-swatch alert-audit__legend-swatch--fire">fire</span>
+      <span class="alert-audit__legend-swatch alert-audit__legend-swatch--suppress">suppress</span>
+      <span class="alert-audit__legend-swatch alert-audit__legend-swatch--recovery">recovery</span>
+      <span class="alert-audit__legend-swatch alert-audit__legend-swatch--cooldown">cooldown</span>
+    </section>
     <section class="alert-audit__table-wrap">
       <table class="alert-audit__table">
         <thead>
@@ -689,6 +718,7 @@ export function renderAlertAuditPage(opts: RenderAlertAuditPageOptions): string 
             <th>Decision</th>
             <th>Severity</th>
             <th>Success rate</th>
+            <th>Actor</th>
             <th>Reason / detail</th>
           </tr>
         </thead>

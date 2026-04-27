@@ -20,6 +20,7 @@ import {
 } from './githubFixes';
 import { selectAlertSender } from './alertSender';
 import { IntegrationAlertMonitor } from './integrationAlertMonitor';
+import { sendAlertAuditDigest } from './alertAuditDigest';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -252,6 +253,38 @@ async function main(): Promise<void> {
     });
   }
 
+  // Daily alert audit digest — 7 AM America/Chicago. Mirrors the CFO/PWS/
+  // content-engine digest pattern: env-gated (ALERT_AUDIT_DIGEST_RECIPIENT
+  // must be set), opt-out via DISABLE_ALERT_AUDIT_DIGEST=1, empty case sends
+  // nothing.
+  let alertAuditDigestJob: { stop(): void } | undefined;
+  if (historyStore) {
+    alertAuditDigestJob = startDailyJob({
+      name: 'alert-audit-digest',
+      hourLocal: 7,
+      timezone: 'America/Chicago',
+      run: async () => {
+        try {
+          const res = await sendAlertAuditDigest({
+            store: historyStore!,
+            sender: emailSelection.sender,
+          });
+          if (res.sent) {
+            console.log(
+              `[empire-dashboard] alert audit digest sent via ${res.transport ?? 'unknown'} (fires=${res.data.totalFires}, total=${res.data.total})`,
+            );
+          } else {
+            console.log(
+              `[empire-dashboard] alert audit digest skipped: ${res.reason}`,
+            );
+          }
+        } catch (err) {
+          console.error('[empire-dashboard] alert audit digest failed:', err);
+        }
+      },
+    });
+  }
+
   const shutdown = (signal: string): void => {
     console.log(`[empire-dashboard] ${signal} received, shutting down`);
     clearInterval(timer);
@@ -259,6 +292,7 @@ async function main(): Promise<void> {
     if (dailyPruneJob) dailyPruneJob.stop();
     if (dailyIntegrationSnapshotJob) dailyIntegrationSnapshotJob.stop();
     if (integrationAlertJob) integrationAlertJob.stop();
+    if (alertAuditDigestJob) alertAuditDigestJob.stop();
     if (historyStore) {
       try { historyStore.close(); } catch { /* ignore */ }
     }

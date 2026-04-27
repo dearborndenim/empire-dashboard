@@ -7,7 +7,81 @@ touched. Yellow = up but idle. Red = down. Minimal, clean, fast — a v1
 monitor that we can layer features onto (alerting, incident history,
 per-user views) as the empire grows.
 
-## Current state — 91% (2026-04-25)
+## Current state — 92% (2026-04-26)
+- Alert audit UI polish 2 — actor filter + per-decision colour bands +
+  daily 7 AM CT email digest:
+  * `?actor=<name>` filter on `/alerts/audit` + `/alerts/audit.csv`. New
+    nullable `actor TEXT` column on `alert_audit_log` via idempotent PRAGMA-
+    gated `ALTER TABLE` migration; pre-existing rows back-filled with
+    `actor='monitor'` so the filter is immediately useful for the dominant
+    audit-row source. `recordAlertAudit` writes an `actor` (cap 64 chars,
+    null when missing/empty); `IntegrationAlertMonitor.safeRecordAudit`
+    tags every monitor-driven row with `actor='monitor'` (caller can
+    override). `AlertAuditQuery.actor` filter implemented in
+    `buildAlertAuditQuery` SQL so list+count stay byte-identical and
+    legacy NULL-actor rows are excluded when an explicit filter is set.
+    Filter input added to the `/alerts/audit` form (cap 64 chars,
+    placeholder "(all)"); preserved across paginated Prev/Next via the
+    `buildAlertAuditPageHref` helper which now takes an optional `actor`
+    field. CSV header gained an `actor` column (between `success_rate` and
+    `reason`); CSV link href on the page round-trips the active actor
+    filter.
+  * Per-decision colour bands on HTML rows. CSS-only — every row already
+    carries the `alert-audit__row--{decision}` modifier class; styles.css
+    now tints with subtle background + 3px coloured left border:
+      - `fire` → red (#b82424)
+      - `recovery` → green (#26a858)
+      - `cooldown` → amber (#d4a81e)
+      - `suppress` → grey (#6c7079)
+    Tints are 7-12% alpha against the table's #131618 background so
+    contrast against the 13px row text stays WCAG-AA. Legend strip
+    rendered above the table with one swatch per decision so the colour
+    code is self-explanatory. Empty-state row colspan grew 6 → 7 to
+    accommodate the new Actor column.
+  * Daily 7 AM CT alert audit digest. New `src/alertAuditDigest.ts`
+    mirrors the weekly-report pattern:
+      - `buildAlertAuditDigestData({store, nowMs?, windowHours?, topN?})`
+        → pure function, snapshots last 24h via `listAlertAudits` w/
+        fractional-day filter (`windowHours / 24`), rolls up per-decision
+        totals + per-integration breakdown sorted fires-first then
+        total-volume then name (cap 10).
+      - `renderAlertAuditDigestText(data)` / `renderAlertAuditDigestHtml(data)`
+        → text + HTML bodies; HTML highlights non-zero fire counts in red
+        (#b82424).
+      - `sendAlertAuditDigest({store, sender, to?, from?, env?})` → ships
+        via the existing `EmailSender` adapter (SMTP w/ console fallback).
+        Short-circuits with `reason: 'opt-out'` when
+        `DISABLE_ALERT_AUDIT_DIGEST=1`, `'no-recipient'` when neither the
+        option nor `ALERT_AUDIT_DIGEST_RECIPIENT` env var is set, and
+        `'empty-window'` when the window has zero rows. Returns a stable
+        `{sent, reason?, data, delivered?, transport?}` shape so the
+        scheduled job can log skips clearly.
+      - Wired into `index.ts` as a daily 7 AM America/Chicago APScheduler-
+        style `startDailyJob`, alongside the existing weekly report + 3 AM
+        prune + 3 AM stats snapshot + 4 AM integration alert check jobs;
+        `shutdown()` stops it.
+    Env: `ALERT_AUDIT_DIGEST_RECIPIENT` (set → digest fires when there is
+    activity), `ALERT_AUDIT_DIGEST_FROM` (envelope sender override),
+    `DISABLE_ALERT_AUDIT_DIGEST=1` (opt-out wins over recipient).
+- `tests/alertAuditPolish2.test.ts` (NEW, 9 tests):
+  * Actor filter — HTML + CSV filter + actor column header + filter form
+    round-trip; legacy NULL rows excluded by explicit filter + em-dash
+    placeholder cell rendered when actor null; pagination Prev/Next
+    preserves actor query param.
+  * Per-decision row classes + legend swatches all rendered.
+  * Digest payload — 24h window math, fires-first ordering, exclusion of
+    rows older than the window, per-integration per-decision counts,
+    text + HTML render smoke check w/ fire-count highlight.
+  * Digest opt-out via `DISABLE_ALERT_AUDIT_DIGEST=1`, no-recipient
+    short-circuit, empty-window short-circuit, happy-path send with
+    option recipient overriding env recipient.
+- 428 → 437 tests passing (+9), 33 suites all green. Coverage holds at
+  ~96% statements / 87% branches / 96.79% lines (new digest module
+  lands at 91.35% / 76.47% / 92.4% — uncovered lines are the
+  `actor === ''` short-circuit branches inside `recordAlertAudit` and
+  the `htmlEscape` corner cases).
+
+## Prior state — 91% (2026-04-25)
 - Alert audit UI polish — pagination + homepage activity tile:
   * `/alerts/audit` + `/alerts/audit.csv` now paginate via `?offset=N`. The
     per-page cap dropped from 500 → **100** rows for nicer UX (constant

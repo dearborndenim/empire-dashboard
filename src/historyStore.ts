@@ -153,6 +153,12 @@ export interface AlertAuditRow {
   severity: string | null;
   /** Optional 0..1 success rate at the moment the audit row was written. */
   success_rate: number | null;
+  /**
+   * Alert audit polish 2 (2026-04-26): who triggered the audit row. Defaults to
+   * "monitor" for rows written by `IntegrationAlertMonitor`. May be null on
+   * legacy rows pre-migration. Free-form short string (capped at 64 chars).
+   */
+  actor?: string | null;
 }
 
 export interface AlertAuditQuery {
@@ -190,6 +196,12 @@ export interface AlertAuditQuery {
    * 0 (first page). Caller is expected to clamp to >= 0.
    */
   offset?: number;
+  /**
+   * Alert audit polish 2 (2026-04-26): exact-match filter on the `actor`
+   * column. Empty string / undefined returns all actors (including legacy
+   * NULL rows). When set, NULL/empty rows are excluded.
+   */
+  actor?: string;
 }
 
 /**
@@ -472,6 +484,22 @@ export class SqliteHistoryStore implements HistoryStore {
     if (!incidentColumns.some((c) => c.name === 'auto_resolved')) {
       this.db.exec(
         'ALTER TABLE incidents ADD COLUMN auto_resolved INTEGER NOT NULL DEFAULT 0',
+      );
+    }
+
+    // Alert audit polish 2 (2026-04-26): track who triggered each audit row.
+    // Idempotent ALTER TABLE (PRAGMA-gated). Legacy rows stay NULL — the UI
+    // filter excludes them when an explicit actor filter is applied.
+    const auditColumns = this.db
+      .prepare("PRAGMA table_info('alert_audit_log')")
+      .all() as Array<{ name: string }>;
+    if (!auditColumns.some((c) => c.name === 'actor')) {
+      this.db.exec('ALTER TABLE alert_audit_log ADD COLUMN actor TEXT');
+      // Best-effort back-fill: every pre-existing row was written by
+      // IntegrationAlertMonitor (the only writer in the codebase), so tag them
+      // with "monitor" so the actor filter immediately yields useful results.
+      this.db.exec(
+        "UPDATE alert_audit_log SET actor = 'monitor' WHERE actor IS NULL",
       );
     }
   }
@@ -1045,11 +1073,16 @@ export class SqliteHistoryStore implements HistoryStore {
    */
   recordAlertAudit(row: Omit<AlertAuditRow, 'id'>): number {
     const reason = (row.reason ?? '').slice(0, 500);
+    // Alert audit polish 2 (2026-04-26): persist the actor (cap at 64 chars).
+    const actor =
+      typeof row.actor === 'string' && row.actor.trim().length > 0
+        ? row.actor.trim().slice(0, 64)
+        : null;
     const result = this.db
       .prepare(
         `INSERT INTO alert_audit_log
-           (at, integration_name, outcome, reason, severity, success_rate)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+           (at, integration_name, outcome, reason, severity, success_rate, actor)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.at,
@@ -1058,6 +1091,7 @@ export class SqliteHistoryStore implements HistoryStore {
         reason,
         row.severity ?? null,
         row.success_rate ?? null,
+        actor,
       );
     return Number(result.lastInsertRowid);
   }
@@ -1158,8 +1192,16 @@ export class SqliteHistoryStore implements HistoryStore {
           break;
       }
     }
+    // Alert audit polish 2 (2026-04-26): exact-match actor filter. Empty
+    // string returns all actors (including legacy NULL rows). When provided,
+    // NULL/empty actor rows are excluded.
+    const actor = (query.actor ?? '').trim();
+    if (actor) {
+      wheres.push('actor = ?');
+      params.push(actor);
+    }
     const whereClause = wheres.length > 0 ? ` WHERE ${wheres.join(' AND ')}` : '';
-    const sql = `SELECT id, at, integration_name, outcome, reason, severity, success_rate FROM alert_audit_log${whereClause}`;
+    const sql = `SELECT id, at, integration_name, outcome, reason, severity, success_rate, actor FROM alert_audit_log${whereClause}`;
     return { sql, params };
   }
 

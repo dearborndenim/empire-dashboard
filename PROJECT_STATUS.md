@@ -7,9 +7,36 @@ touched. Yellow = up but idle. Red = down. Minimal, clean, fast — a v1
 monitor that we can layer features onto (alerting, incident history,
 per-user views) as the empire grows.
 
-## Current state — 92% (2026-04-26)
+## Current state — 93% (2026-04-27)
+- Alert audit UI polish 3 — saved views + per-actor digest + SMTP adapter
+  (this session):
+  * **Saved audit-filter views** — `alert_audit_saved_views` SQLite table
+    (id, name UNIQUE, query_string, created_at) + idempotent `CREATE IF
+    NOT EXISTS`. New `HistoryStore` methods `createAlertAuditSavedView()` /
+    `listAlertAuditSavedViews()` / `deleteAlertAuditSavedView()`. Endpoints
+    on `/alerts/audit/views` (GET HTML list + form, POST create, DELETE
+    by id) — admin-token gated via shared `requireAdminToken` helper.
+    Saved-views sidebar dropdown rendered above the audit table on
+    `/alerts/audit` (click-through links append the saved query string).
+  * **Per-actor digest variant** — new `buildPerActorDigests()` in
+    `src/alertAuditDigest.ts` mirrors PWS per-scanner pattern. One
+    payload per non-empty actor over the trailing 24h. Daily 7:05 AM CT
+    `startDailyJob` (5 min after the existing fleet digest). Opt-IN via
+    `ALERT_AUDIT_PER_ACTOR_DIGEST=1` (default off). Hard opt-out
+    `DISABLE_ALERT_AUDIT_PER_ACTOR_DIGEST=1` wins.
+  * **SMTP adapter for alert audit digest** — `selectAlertAuditDigestSender(env)`
+    factory returns real SMTP transport when `SMTP_HOST` + creds are
+    present, else falls back to console (mirror content-engine
+    `src/jobs/rejectionDigestEmail.ts`). Lazy-required nodemailer to
+    avoid loading in test runtimes.
+  * +16 tests on `tests/alertAuditPolish3.test.ts` covering saved-views
+    CRUD (insert / list newest-first / unique name throws / delete by id),
+    per-actor splitting (groups → one payload per actor, empty actors
+    skipped), and SMTP factory env parsing (Console fallback when
+    SMTP_HOST unset, SMTP transport when creds present).
+
 - Alert audit UI polish 2 — actor filter + per-decision colour bands +
-  daily 7 AM CT email digest:
+  daily 7 AM CT email digest (prior session):
   * `?actor=<name>` filter on `/alerts/audit` + `/alerts/audit.csv`. New
     nullable `actor TEXT` column on `alert_audit_log` via idempotent PRAGMA-
     gated `ALTER TABLE` migration; pre-existing rows back-filled with

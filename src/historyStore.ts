@@ -216,6 +216,23 @@ export interface AlertActivitySummaryRow {
 }
 
 /**
+ * Alert audit polish 3 (2026-04-27): saved /alerts/audit filter view. Stored
+ * server-side so common filter combos (e.g. "kanban fires last 7d") can be
+ * one-click recalled from the audit page sidebar. The `query_string` is the
+ * raw URL-encoded query (without leading `?`) — the page just appends it to
+ * `/alerts/audit?` for the click-through.
+ */
+export interface AlertAuditSavedViewRow {
+  id: number;
+  /** Unique short label, capped at 64 chars at the call site. */
+  name: string;
+  /** Raw URL query string (no leading `?`), capped at 1024 chars. */
+  query_string: string;
+  /** ISO timestamp the view was created. */
+  created_at: string;
+}
+
+/**
  * Alert audit UI (2026-04-24): derived decision bucket surfaced on the
  * /alerts/audit UI. See `AlertAuditQuery.decision` for the rules.
  */
@@ -356,6 +373,19 @@ export interface HistoryStore {
     limit?: number;
     nowMs?: number;
   }): AlertActivitySummaryRow[];
+  /**
+   * Alert audit polish 3 (2026-04-27): create a saved view. Returns the
+   * persisted row. Throws when the name already exists (unique constraint),
+   * so callers can map that to a 409.
+   */
+  createAlertAuditSavedView(name: string, queryString: string): AlertAuditSavedViewRow;
+  /** List all saved views, newest first by id. */
+  listAlertAuditSavedViews(): AlertAuditSavedViewRow[];
+  /**
+   * Delete a saved view by id. Returns true if a row was deleted, false when
+   * the id wasn't found.
+   */
+  deleteAlertAuditSavedView(id: number): boolean;
   close(): void;
 }
 
@@ -448,6 +478,14 @@ export class SqliteHistoryStore implements HistoryStore {
         ON alert_audit_log(at);
       CREATE INDEX IF NOT EXISTS idx_alert_audit_log_int
         ON alert_audit_log(integration_name, at);
+      CREATE TABLE IF NOT EXISTS alert_audit_saved_views (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        query_string TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_alert_audit_saved_views_created
+        ON alert_audit_saved_views(created_at);
     `);
 
     // Incidents v5: add root_cause column if missing. sqlite lets us check
@@ -1203,6 +1241,44 @@ export class SqliteHistoryStore implements HistoryStore {
     const whereClause = wheres.length > 0 ? ` WHERE ${wheres.join(' AND ')}` : '';
     const sql = `SELECT id, at, integration_name, outcome, reason, severity, success_rate, actor FROM alert_audit_log${whereClause}`;
     return { sql, params };
+  }
+
+  /**
+   * Alert audit polish 3 (2026-04-27): persist a named filter view. Names are
+   * unique — duplicate inserts throw the underlying SQLite UNIQUE constraint
+   * error (callers map to 409). Trims + caps name to 64 chars and
+   * query_string to 1024.
+   */
+  createAlertAuditSavedView(name: string, queryString: string): AlertAuditSavedViewRow {
+    const cleanName = (name ?? '').trim().slice(0, 64);
+    const cleanQuery = (queryString ?? '').trim().slice(0, 1024);
+    const createdAt = new Date(this.now()).toISOString();
+    const result = this.db
+      .prepare(
+        'INSERT INTO alert_audit_saved_views (name, query_string, created_at) VALUES (?, ?, ?)',
+      )
+      .run(cleanName, cleanQuery, createdAt);
+    return {
+      id: Number(result.lastInsertRowid),
+      name: cleanName,
+      query_string: cleanQuery,
+      created_at: createdAt,
+    };
+  }
+
+  listAlertAuditSavedViews(): AlertAuditSavedViewRow[] {
+    return this.db
+      .prepare(
+        'SELECT id, name, query_string, created_at FROM alert_audit_saved_views ORDER BY id DESC',
+      )
+      .all() as AlertAuditSavedViewRow[];
+  }
+
+  deleteAlertAuditSavedView(id: number): boolean {
+    const result = this.db
+      .prepare('DELETE FROM alert_audit_saved_views WHERE id = ?')
+      .run(id);
+    return result.changes > 0;
   }
 
   close(): void {

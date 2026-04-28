@@ -9,6 +9,7 @@ import {
   renderIncidentsPage,
   RenderPruneRun,
   renderAlertAuditPage,
+  renderAlertAuditSavedViewsPage,
 } from './render';
 import {
   HistoryStore,
@@ -690,6 +691,18 @@ export function createApp(deps: AppDeps): Express {
         offset,
       });
       const totalMatched = deps.historyStore.countAlertAudits(query);
+      // Alert audit polish 3 (2026-04-27): saved filter views sidebar.
+      let savedViews: Array<{ id: number; name: string; query_string: string }> = [];
+      try {
+        savedViews = deps.historyStore.listAlertAuditSavedViews().map((v) => ({
+          id: v.id,
+          name: v.name,
+          query_string: v.query_string,
+        }));
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('[empire-dashboard] saved-views read failed:', err);
+      }
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(
         renderAlertAuditPage({
@@ -704,12 +717,127 @@ export function createApp(deps: AppDeps): Express {
             days: query.days ?? 7,
             actor: query.actor ?? '',
           },
+          savedViews,
         }),
       );
     } catch (err) {
       res.status(500).send(
         `<h1>Alert audit page error</h1><pre>${err instanceof Error ? err.message : String(err)}</pre>`,
       );
+    }
+  });
+
+  /**
+   * Alert audit polish 3 (2026-04-27): list + manage saved /alerts/audit
+   * filter views. Same admin-token gate as the audit page itself.
+   *
+   * Routes:
+   *  - GET    /alerts/audit/views          → HTML list + new-view form
+   *  - POST   /alerts/audit/views          → create (name + query_string body)
+   *  - DELETE /alerts/audit/views/:id      → remove
+   */
+  app.get('/alerts/audit/views', (req, res) => {
+    try {
+      if (!deps.historyStore) {
+        res.status(503).send('<h1>history store unavailable</h1>');
+        return;
+      }
+      if (!requireAdminTokenForHtml(req, res, deps.incidentsAdminToken)) return;
+      const views = deps.historyStore.listAlertAuditSavedViews();
+      const flash = typeof req.query.flash === 'string' ? req.query.flash : '';
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(
+        renderAlertAuditSavedViewsPage({
+          generatedAt: new Date().toISOString(),
+          views: views.map((v) => ({
+            id: v.id,
+            name: v.name,
+            query_string: v.query_string,
+            created_at: v.created_at,
+          })),
+          flash,
+        }),
+      );
+    } catch (err) {
+      res.status(500).send(
+        `<h1>Saved views error</h1><pre>${err instanceof Error ? err.message : String(err)}</pre>`,
+      );
+    }
+  });
+
+  app.post('/alerts/audit/views', (req, res) => {
+    try {
+      if (!deps.historyStore) {
+        res.status(503).json({ error: 'history store unavailable' });
+        return;
+      }
+      if (!requireAdminToken(req, res, deps.incidentsAdminToken)) return;
+      const body = (req.body ?? {}) as { name?: unknown; query_string?: unknown; queryString?: unknown };
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      const queryRaw =
+        typeof body.query_string === 'string'
+          ? body.query_string
+          : typeof body.queryString === 'string'
+            ? body.queryString
+            : '';
+      const queryString = typeof queryRaw === 'string' ? queryRaw.trim().replace(/^\?+/, '') : '';
+      if (!name) {
+        res.status(400).json({ error: 'name is required' });
+        return;
+      }
+      if (name.length > 64) {
+        res.status(400).json({ error: 'name exceeds 64 characters' });
+        return;
+      }
+      if (queryString.length > 1024) {
+        res.status(400).json({ error: 'query_string exceeds 1024 characters' });
+        return;
+      }
+      try {
+        const created = deps.historyStore.createAlertAuditSavedView(name, queryString);
+        res.status(201).json({
+          id: created.id,
+          name: created.name,
+          query_string: created.query_string,
+          created_at: created.created_at,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/UNIQUE constraint/i.test(msg) || /SQLITE_CONSTRAINT/i.test(msg)) {
+          res.status(409).json({ error: 'a saved view with that name already exists' });
+          return;
+        }
+        throw err;
+      }
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  app.delete('/alerts/audit/views/:id', (req, res) => {
+    try {
+      if (!deps.historyStore) {
+        res.status(503).json({ error: 'history store unavailable' });
+        return;
+      }
+      if (!requireAdminToken(req, res, deps.incidentsAdminToken)) return;
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        res.status(400).json({ error: 'invalid view id' });
+        return;
+      }
+      const removed = deps.historyStore.deleteAlertAuditSavedView(id);
+      if (!removed) {
+        res.status(404).json({ error: 'saved view not found' });
+        return;
+      }
+      res.status(204).end();
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   });
 

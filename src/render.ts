@@ -548,6 +548,13 @@ export interface RenderAlertAuditPageOptions {
      */
     actor?: string;
   };
+  /**
+   * Alert audit polish 3 (2026-04-27): list of saved /alerts/audit filter
+   * views. Rendered as a sidebar/dropdown of click-through links so the
+   * operator can recall common queries in one click. Undefined / empty omits
+   * the section entirely.
+   */
+  savedViews?: Array<{ id: number; name: string; query_string: string }>;
 }
 
 /**
@@ -573,6 +580,187 @@ export function buildAlertAuditPageHref(
     parts.push(`offset=${offset}`);
   }
   return `/alerts/audit?${parts.join('&')}`;
+}
+
+/**
+ * Alert audit polish 3 (2026-04-27): server-rendered "Saved views" sidebar
+ * on /alerts/audit. Each row is a click-through to /alerts/audit?<query>.
+ * Empty list omits the section entirely so we don't add layout shift.
+ */
+function renderAlertAuditSavedViewsSidebar(
+  views: Array<{ id: number; name: string; query_string: string }> | undefined,
+): string {
+  const list = views ?? [];
+  if (list.length === 0) {
+    return `<aside class="alert-audit__saved-views" aria-label="Saved filter views">
+      <div class="alert-audit__saved-views-head">
+        <span class="alert-audit__saved-views-title">Saved views</span>
+        <a class="alert-audit__saved-views-manage" href="/alerts/audit/views">manage</a>
+      </div>
+      <div class="alert-audit__saved-views-empty">No saved views yet.</div>
+    </aside>`;
+  }
+  const items = list
+    .map((v) => {
+      const name = escapeHtml(v.name);
+      const qs = (v.query_string ?? '').replace(/^\?+/, '');
+      const href = qs ? `/alerts/audit?${qs}` : `/alerts/audit`;
+      return `<li class="alert-audit__saved-view-item">
+        <a class="alert-audit__saved-view-link" href="${escapeHtml(href)}" title="${escapeHtml(qs || '(no filters)')}">${name}</a>
+      </li>`;
+    })
+    .join('');
+  return `<aside class="alert-audit__saved-views" aria-label="Saved filter views">
+    <div class="alert-audit__saved-views-head">
+      <span class="alert-audit__saved-views-title">Saved views</span>
+      <a class="alert-audit__saved-views-manage" href="/alerts/audit/views">manage</a>
+    </div>
+    <ul class="alert-audit__saved-views-list">${items}</ul>
+  </aside>`;
+}
+
+export interface RenderAlertAuditSavedViewsPageOptions {
+  generatedAt: string;
+  views: Array<{
+    id: number;
+    name: string;
+    query_string: string;
+    created_at: string;
+  }>;
+  /** Optional flash message after a save/delete redirect. */
+  flash?: string;
+}
+
+/**
+ * Alert audit polish 3 (2026-04-27): standalone /alerts/audit/views page.
+ * Renders the existing saved views as a list with delete buttons + a "new
+ * view" form that POSTs back via the admin token. The form's submit handler
+ * is wired through inline JS for a single-page-friendly UX.
+ */
+export function renderAlertAuditSavedViewsPage(
+  opts: RenderAlertAuditSavedViewsPageOptions,
+): string {
+  const flashHtml = opts.flash
+    ? `<div class="alert-audit__saved-views-flash" role="status">${escapeHtml(opts.flash)}</div>`
+    : '';
+  const rows = opts.views.length === 0
+    ? `<tr><td colspan="4" class="alert-audit__saved-views-empty-row">No saved views yet. Use the form below to add one.</td></tr>`
+    : opts.views
+        .map((v) => {
+          const qs = (v.query_string ?? '').replace(/^\?+/, '');
+          const href = qs ? `/alerts/audit?${qs}` : `/alerts/audit`;
+          return `<tr class="alert-audit__saved-views-row" data-view-id="${v.id}">
+            <td class="alert-audit__saved-views-cell"><a href="${escapeHtml(href)}">${escapeHtml(v.name)}</a></td>
+            <td class="alert-audit__saved-views-cell"><code>${escapeHtml(qs || '(no filters)')}</code></td>
+            <td class="alert-audit__saved-views-cell">${escapeHtml(v.created_at)}</td>
+            <td class="alert-audit__saved-views-cell">
+              <button type="button" class="alert-audit__saved-views-delete" data-view-id="${v.id}">delete</button>
+            </td>
+          </tr>`;
+        })
+        .join('\n');
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Saved alert audit views · Empire Dashboard</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="wrap">
+    <header class="head">
+      <h1>Saved alert audit views</h1>
+      <div class="generated">Generated ${escapeHtml(opts.generatedAt)}</div>
+    </header>
+    ${flashHtml}
+    <section class="alert-audit__saved-views-section" aria-label="Existing saved views">
+      <table class="alert-audit__saved-views-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Filter</th>
+            <th>Created</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+${rows}
+        </tbody>
+      </table>
+    </section>
+    <section class="alert-audit__saved-views-form-section" aria-label="New saved view">
+      <h2 class="alert-audit__saved-views-form-title">Save a new view</h2>
+      <form class="alert-audit__saved-views-form" id="saved-view-form">
+        <label class="alert-audit__saved-views-label">
+          Name
+          <input type="text" name="name" id="saved-view-name" maxlength="64" required />
+        </label>
+        <label class="alert-audit__saved-views-label">
+          Filter (URL query string)
+          <input type="text" name="query_string" id="saved-view-query" maxlength="1024" placeholder="integration=kanban&decision=fire&days=7" />
+        </label>
+        <button type="submit" class="alert-audit__saved-views-save">Save view</button>
+        <span class="alert-audit__saved-views-status" id="saved-view-status" aria-live="polite"></span>
+      </form>
+    </section>
+    <footer class="foot">
+      <a href="/alerts/audit">← back to /alerts/audit</a>
+    </footer>
+  </main>
+  <script>
+(function(){
+  function getAdminToken(){
+    var cached = window.sessionStorage && window.sessionStorage.getItem('empireAdminToken');
+    if (cached) return cached;
+    var t = window.prompt('Admin token (x-admin-token):');
+    if (t && window.sessionStorage) window.sessionStorage.setItem('empireAdminToken', t);
+    return t;
+  }
+  var form = document.getElementById('saved-view-form');
+  var statusEl = document.getElementById('saved-view-status');
+  if (form) {
+    form.addEventListener('submit', function(ev){
+      ev.preventDefault();
+      var token = getAdminToken();
+      if (!token) { if (statusEl) statusEl.textContent = 'token required'; return; }
+      var name = (document.getElementById('saved-view-name') || {}).value || '';
+      var qs = (document.getElementById('saved-view-query') || {}).value || '';
+      if (statusEl) statusEl.textContent = 'saving…';
+      fetch('/alerts/audit/views', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-admin-token': token },
+        body: JSON.stringify({ name: name, query_string: qs })
+      }).then(function(r){
+        if (r.ok) { window.location.reload(); }
+        else if (statusEl) {
+          r.json().then(function(j){ statusEl.textContent = (j && j.error) || ('error ' + r.status); }).catch(function(){
+            statusEl.textContent = 'error ' + r.status;
+          });
+        }
+      }).catch(function(){ if (statusEl) statusEl.textContent = 'network error'; });
+    });
+  }
+  document.querySelectorAll('button.alert-audit__saved-views-delete').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var id = btn.getAttribute('data-view-id');
+      if (!id) return;
+      var token = getAdminToken();
+      if (!token) { if (statusEl) statusEl.textContent = 'token required'; return; }
+      if (!window.confirm('Delete saved view?')) return;
+      fetch('/alerts/audit/views/' + encodeURIComponent(id), {
+        method: 'DELETE',
+        headers: { 'x-admin-token': token }
+      }).then(function(r){
+        if (r.ok || r.status === 204) { window.location.reload(); }
+        else if (statusEl) statusEl.textContent = 'error ' + r.status;
+      }).catch(function(){ if (statusEl) statusEl.textContent = 'network error'; });
+    });
+  });
+})();
+</script>
+</body>
+</html>`;
 }
 
 export function renderAlertAuditPage(opts: RenderAlertAuditPageOptions): string {
@@ -709,6 +897,7 @@ export function renderAlertAuditPage(opts: RenderAlertAuditPageOptions): string 
       <span class="alert-audit__legend-swatch alert-audit__legend-swatch--recovery">recovery</span>
       <span class="alert-audit__legend-swatch alert-audit__legend-swatch--cooldown">cooldown</span>
     </section>
+    ${renderAlertAuditSavedViewsSidebar(opts.savedViews)}
     <section class="alert-audit__table-wrap">
       <table class="alert-audit__table">
         <thead>

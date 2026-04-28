@@ -20,7 +20,11 @@ import {
 } from './githubFixes';
 import { selectAlertSender } from './alertSender';
 import { IntegrationAlertMonitor } from './integrationAlertMonitor';
-import { sendAlertAuditDigest } from './alertAuditDigest';
+import {
+  sendAlertAuditDigest,
+  sendPerActorAlertAuditDigests,
+  selectAlertAuditDigestSender,
+} from './alertAuditDigest';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -253,6 +257,10 @@ async function main(): Promise<void> {
     });
   }
 
+  // Alert audit digest sender — uses SMTP when configured, console fallback
+  // otherwise. Mirrors content-engine's selectDigestSender pattern.
+  const alertAuditDigestSender = selectAlertAuditDigestSender(process.env);
+
   // Daily alert audit digest — 7 AM America/Chicago. Mirrors the CFO/PWS/
   // content-engine digest pattern: env-gated (ALERT_AUDIT_DIGEST_RECIPIENT
   // must be set), opt-out via DISABLE_ALERT_AUDIT_DIGEST=1, empty case sends
@@ -267,7 +275,7 @@ async function main(): Promise<void> {
         try {
           const res = await sendAlertAuditDigest({
             store: historyStore!,
-            sender: emailSelection.sender,
+            sender: alertAuditDigestSender,
           });
           if (res.sent) {
             console.log(
@@ -285,6 +293,46 @@ async function main(): Promise<void> {
     });
   }
 
+  // Alert audit polish 3 (2026-04-27): per-actor digest variant. Opt-IN via
+  // ALERT_AUDIT_PER_ACTOR_DIGEST=1; hard opt-out via
+  // DISABLE_ALERT_AUDIT_PER_ACTOR_DIGEST=1 (wins over opt-in). Splits the
+  // 24h window by `actor` and sends one email per non-empty actor with
+  // ≥1 row to the recipient resolved from
+  // ALERT_AUDIT_PER_ACTOR_DIGEST_RECIPIENT (or the default digest recipient).
+  // Runs at 7:05 AM CT — 5 minutes after the canonical digest so the two
+  // jobs don't compete for SMTP capacity.
+  let alertAuditPerActorDigestJob: { stop(): void } | undefined;
+  if (
+    historyStore &&
+    (process.env.ALERT_AUDIT_PER_ACTOR_DIGEST ?? '').trim() === '1' &&
+    (process.env.DISABLE_ALERT_AUDIT_PER_ACTOR_DIGEST ?? '').trim() !== '1'
+  ) {
+    alertAuditPerActorDigestJob = startDailyJob({
+      name: 'alert-audit-per-actor-digest',
+      hourLocal: 7,
+      minuteLocal: 5,
+      timezone: 'America/Chicago',
+      run: async () => {
+        try {
+          const res = await sendPerActorAlertAuditDigests({
+            store: historyStore!,
+            sender: alertAuditDigestSender,
+            defaultRecipient:
+              process.env.ALERT_AUDIT_PER_ACTOR_DIGEST_RECIPIENT ||
+              process.env.ALERT_AUDIT_DIGEST_RECIPIENT,
+          });
+          const sent = res.filter((r) => r.sent).length;
+          const skipped = res.length - sent;
+          console.log(
+            `[empire-dashboard] alert audit per-actor digest: sent=${sent} skipped=${skipped} actors=${res.length}`,
+          );
+        } catch (err) {
+          console.error('[empire-dashboard] per-actor digest failed:', err);
+        }
+      },
+    });
+  }
+
   const shutdown = (signal: string): void => {
     console.log(`[empire-dashboard] ${signal} received, shutting down`);
     clearInterval(timer);
@@ -293,6 +341,7 @@ async function main(): Promise<void> {
     if (dailyIntegrationSnapshotJob) dailyIntegrationSnapshotJob.stop();
     if (integrationAlertJob) integrationAlertJob.stop();
     if (alertAuditDigestJob) alertAuditDigestJob.stop();
+    if (alertAuditPerActorDigestJob) alertAuditPerActorDigestJob.stop();
     if (historyStore) {
       try { historyStore.close(); } catch { /* ignore */ }
     }

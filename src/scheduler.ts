@@ -116,24 +116,34 @@ export interface StartWeeklyJobOptions extends WeeklyScheduleOptions {
 export interface DailyScheduleOptions {
   /** 0-23 hour in wall-clock of `timezone`. */
   hourLocal: number;
+  /**
+   * Optional 0-59 minute. Defaults to 0 (top of the hour). Useful when
+   * staggering multiple daily jobs that share an hour.
+   */
+  minuteLocal?: number;
   /** IANA timezone id, e.g. "America/Chicago". */
   timezone: string;
   now?: () => number;
 }
 
 /**
- * Compute milliseconds until the next daily occurrence of `hourLocal:00` in
- * `timezone`, strictly greater than zero.
+ * Compute milliseconds until the next daily occurrence of
+ * `hourLocal:minuteLocal` in `timezone`, strictly greater than zero.
+ * `minuteLocal` defaults to 0 (top of the hour) for back-compat with
+ * pre-polish-3 callers.
  */
 export function msUntilNextDailyRun(opts: DailyScheduleOptions): number {
   const now = opts.now ? opts.now() : Date.now();
   const stepMs = 60_000;
   const start = Math.ceil((now + 1) / stepMs) * stepMs;
   const maxSteps = 2 * 24 * 60; // 2 days of minutes — safe upper bound
+  const minute = typeof opts.minuteLocal === 'number' && Number.isFinite(opts.minuteLocal)
+    ? Math.max(0, Math.min(59, Math.floor(opts.minuteLocal)))
+    : 0;
   for (let i = 0; i < maxSteps; i++) {
     const candidate = start + i * stepMs;
     const parts = partsInZone(candidate, opts.timezone);
-    if (parts.hour === opts.hourLocal && parts.minute === 0) {
+    if (parts.hour === opts.hourLocal && parts.minute === minute) {
       return candidate - now;
     }
   }

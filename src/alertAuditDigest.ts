@@ -23,7 +23,7 @@
  */
 
 import { AlertAuditRow, HistoryStore, deriveAlertDecision } from './historyStore';
-import { EmailMessage, EmailSender } from './email';
+import { ConsoleEmailSender, EmailMessage, EmailSender } from './email';
 
 export interface AlertAuditDigestIntegrationRow {
   integration_name: string;
@@ -270,6 +270,168 @@ export interface SendAlertAuditDigestResult {
 }
 
 /**
+ * Alert audit polish 3 (2026-04-27): per-actor digest variant. Splits the
+ * 24h audit window by `actor` and emits one digest payload per non-empty
+ * actor. Mirrors the piece-work-scanner per-scanner digest pattern so an
+ * operator can subscribe a specific recipient to a specific actor's
+ * activity (e.g. CLI-driven cleanup runs vs. the monitor's automated
+ * fires).
+ *
+ * Rows with NULL/empty `actor` are bucketed under the synthetic key
+ * `(unattributed)` so legacy data is still surfaced — but we do NOT send
+ * an email for that bucket (it would add noise without context). Callers
+ * that want it can opt in by listing `(unattributed)` explicitly in their
+ * downstream router.
+ */
+export interface PerActorDigestPayload {
+  actor: string;
+  data: AlertAuditDigestData;
+}
+
+export interface BuildPerActorDigestsOptions extends BuildAlertAuditDigestOptions {
+  /** Optional cap to skip actors below this many rows. Default 1. */
+  minRows?: number;
+}
+
+/**
+ * Group last-Nh audit rows by actor and produce one digest payload per
+ * non-null/non-empty actor with at least `minRows` rows. Returns a sorted
+ * list (most rows first, then alphabetical) so the scheduler logs read
+ * cleanly.
+ */
+export function buildPerActorDigests(
+  opts: BuildPerActorDigestsOptions,
+): PerActorDigestPayload[] {
+  const nowMs = opts.nowMs ?? Date.now();
+  const windowHours = opts.windowHours ?? 24;
+  const topN = opts.topN ?? 10;
+  const minRows = Math.max(1, opts.minRows ?? 1);
+  const days = windowHours / 24;
+
+  const rows = opts.store.listAlertAudits({ days, nowMs, limit: 5000 });
+  const byActor = new Map<string, AlertAuditRow[]>();
+  for (const r of rows) {
+    const actor = (r.actor ?? '').trim();
+    if (!actor) continue; // skip unattributed rows for the per-actor split
+    let bucket = byActor.get(actor);
+    if (!bucket) {
+      bucket = [];
+      byActor.set(actor, bucket);
+    }
+    bucket.push(r);
+  }
+
+  const payloads: PerActorDigestPayload[] = [];
+  for (const [actor, actorRows] of byActor.entries()) {
+    if (actorRows.length < minRows) continue;
+    // Reuse the same per-row aggregation as buildAlertAuditDigestData by
+    // funnelling through a shim store that returns the pre-filtered rows.
+    const shimStore: HistoryStore = {
+      ...opts.store,
+      listAlertAudits: () => actorRows,
+    } as HistoryStore;
+    const data = buildAlertAuditDigestData({
+      store: shimStore,
+      nowMs,
+      windowHours,
+      topN,
+    });
+    payloads.push({ actor, data });
+  }
+  payloads.sort((a, b) => {
+    if (b.data.total !== a.data.total) return b.data.total - a.data.total;
+    return a.actor.localeCompare(b.actor);
+  });
+  return payloads;
+}
+
+export interface SendPerActorAlertAuditDigestsOptions
+  extends BuildPerActorDigestsOptions {
+  sender: EmailSender;
+  /**
+   * Map of actor → recipient. When an actor is missing from the map and
+   * `defaultRecipient` is set, we fall back; otherwise we skip the actor
+   * with `reason: 'no-recipient'`.
+   */
+  recipients?: Record<string, string>;
+  /** Fallback recipient for actors without an explicit map entry. */
+  defaultRecipient?: string;
+  from?: string;
+  env?: NodeJS.ProcessEnv;
+}
+
+export interface PerActorDigestSendResult {
+  actor: string;
+  sent: boolean;
+  reason?: 'opt-out' | 'no-recipient' | 'empty-window';
+  data: AlertAuditDigestData;
+  delivered?: boolean;
+  transport?: string;
+}
+
+/**
+ * Ship one digest email per non-empty actor with ≥ `minRows` rows in the
+ * window. Routing rules:
+ *   - When `DISABLE_ALERT_AUDIT_PER_ACTOR_DIGEST=1` we short-circuit ALL
+ *     actors with reason `opt-out` — opt-out wins over recipient.
+ *   - Recipient resolution per actor: `recipients[actor]`, then
+ *     `defaultRecipient`, then env `ALERT_AUDIT_PER_ACTOR_DIGEST_RECIPIENT`.
+ *   - When the actor's payload is empty (no rows survive aggregation —
+ *     should never happen given we filter first, but defensive), reason
+ *     `empty-window`.
+ *
+ * Returns one result per actor split, in the same sort order as
+ * `buildPerActorDigests`.
+ */
+export async function sendPerActorAlertAuditDigests(
+  opts: SendPerActorAlertAuditDigestsOptions,
+): Promise<PerActorDigestSendResult[]> {
+  const env = opts.env ?? process.env;
+  const optOut = (env.DISABLE_ALERT_AUDIT_PER_ACTOR_DIGEST ?? '').trim() === '1';
+  const fallbackEnvRecipient = (env.ALERT_AUDIT_PER_ACTOR_DIGEST_RECIPIENT ?? '').trim();
+  const payloads = buildPerActorDigests(opts);
+  const results: PerActorDigestSendResult[] = [];
+  for (const { actor, data } of payloads) {
+    if (optOut) {
+      results.push({ actor, sent: false, reason: 'opt-out', data });
+      continue;
+    }
+    const recipient = (
+      (opts.recipients && opts.recipients[actor]) ||
+      opts.defaultRecipient ||
+      fallbackEnvRecipient ||
+      ''
+    ).trim();
+    if (!recipient) {
+      results.push({ actor, sent: false, reason: 'no-recipient', data });
+      continue;
+    }
+    if (data.total === 0) {
+      results.push({ actor, sent: false, reason: 'empty-window', data });
+      continue;
+    }
+    const text = renderAlertAuditDigestText(data);
+    const html = renderAlertAuditDigestHtml(data);
+    const message: EmailMessage = {
+      to: recipient,
+      from: opts.from ?? env.ALERT_AUDIT_DIGEST_FROM ?? undefined,
+      subject: `Empire Dashboard — alert audit digest (actor=${actor}, ${data.totalFires} fire${data.totalFires === 1 ? '' : 's'} / ${data.windowHours}h)`,
+      text,
+      html,
+    };
+    const result = await opts.sender.send(message);
+    results.push({
+      actor,
+      sent: true,
+      data,
+      delivered: result.delivered,
+      transport: result.transport,
+    });
+  }
+  return results;
+}
+
+/**
  * Build + send the daily digest. Idempotent: when the window is empty OR
  * the opt-out env var is set OR no recipient configured, we short-circuit
  * with a stable result shape (so the caller can log it).
@@ -312,4 +474,151 @@ export async function sendAlertAuditDigest(
     delivered: result.delivered,
     transport: result.transport,
   };
+}
+
+/**
+ * Alert audit polish 3 (2026-04-27): SMTP adapter for the alert audit digest
+ * sender. Mirrors the content-engine `selectDigestSender` pattern: returns a
+ * real SMTP-backed `EmailSender` when SMTP_HOST + creds are present;
+ * otherwise falls back to the existing stdout `ConsoleEmailSender`. The
+ * adapter lazy-requires `nodemailer` so tests that never configure SMTP
+ * never load it.
+ *
+ * Env keys honoured (matching the empire-dashboard SMTP convention used by
+ * `email.ts`):
+ *   SMTP_HOST, SMTP_PORT (default 587), SMTP_USER, SMTP_PASS, SMTP_SECURE,
+ *   SMTP_FROM (envelope sender fallback).
+ *
+ * If only one of SMTP_USER/SMTP_PASS is provided we treat the env as
+ * misconfigured and fall back to console — this mirrors the content-engine
+ * factory so a half-configured deploy never silently sends authenticated
+ * email with empty creds.
+ */
+export interface AlertAuditDigestSmtpConfig {
+  host: string;
+  port: number;
+  user?: string;
+  pass?: string;
+  from?: string;
+  secure?: boolean;
+}
+
+export interface AlertAuditDigestSmtpTransporterLike {
+  sendMail(mail: {
+    from?: string;
+    to: string | string[];
+    subject: string;
+    text: string;
+    html?: string;
+  }): Promise<unknown>;
+}
+
+export interface AlertAuditDigestSmtpSenderOptions {
+  config: AlertAuditDigestSmtpConfig;
+  transporter?: AlertAuditDigestSmtpTransporterLike;
+  transporterFactory?: (
+    config: AlertAuditDigestSmtpConfig,
+  ) => AlertAuditDigestSmtpTransporterLike;
+}
+
+/**
+ * Real SMTP-backed `EmailSender` for the alert audit digest. Conforms to the
+ * existing `EmailSender` contract so `sendAlertAuditDigest` doesn't need to
+ * change. Failures are non-fatal — we log + return `delivered=false` so the
+ * caller can decide how to surface them.
+ */
+export class SmtpAlertAuditDigestSender implements EmailSender {
+  private readonly transporter: AlertAuditDigestSmtpTransporterLike;
+  private readonly defaultFrom?: string;
+
+  constructor(opts: AlertAuditDigestSmtpSenderOptions) {
+    this.defaultFrom = opts.config.from;
+    if (opts.transporter) {
+      this.transporter = opts.transporter;
+      return;
+    }
+    const factory = opts.transporterFactory ?? defaultAlertAuditDigestSmtpFactory;
+    this.transporter = factory(opts.config);
+  }
+
+  async send(
+    message: EmailMessage,
+  ): Promise<{ delivered: boolean; transport: string }> {
+    try {
+      await this.transporter.sendMail({
+        from: message.from ?? this.defaultFrom,
+        to: message.to,
+        subject: message.subject,
+        text: message.text,
+        html: message.html,
+      });
+      return { delivered: true, transport: 'smtp' };
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[empire-dashboard] alert-audit digest SMTP send failed:', err);
+      return { delivered: false, transport: 'smtp' };
+    }
+  }
+}
+
+function defaultAlertAuditDigestSmtpFactory(
+  config: AlertAuditDigestSmtpConfig,
+): AlertAuditDigestSmtpTransporterLike {
+  // Lazy-require so test runtimes never load nodemailer for the console
+  // path — the runtime dep is already declared in package.json (used by
+  // src/email.ts too).
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodemailer = require('nodemailer');
+  const auth =
+    config.user && config.pass ? { user: config.user, pass: config.pass } : undefined;
+  const secure = config.secure ?? config.port === 465;
+  return nodemailer.createTransport({
+    host: config.host,
+    port: config.port,
+    secure,
+    auth,
+  }) as unknown as AlertAuditDigestSmtpTransporterLike;
+}
+
+/**
+ * Parse SMTP env vars for the alert audit digest. Returns null when host is
+ * missing or partial credentials (only one of user/pass set).
+ */
+export function readAlertAuditDigestSmtpConfigFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): AlertAuditDigestSmtpConfig | null {
+  const host = (env.SMTP_HOST ?? '').trim();
+  if (!host) return null;
+  const portRaw = env.SMTP_PORT;
+  const port = portRaw ? Number(portRaw) : 587;
+  const validPort = Number.isFinite(port) && port > 0 ? port : 587;
+  const user = env.SMTP_USER?.trim() || undefined;
+  const pass = env.SMTP_PASS?.trim() || undefined;
+  if ((user && !pass) || (!user && pass)) return null;
+  const secureRaw = (env.SMTP_SECURE ?? '').trim().toLowerCase();
+  let secure: boolean | undefined;
+  if (secureRaw === '1' || secureRaw === 'true') secure = true;
+  else if (secureRaw === '0' || secureRaw === 'false') secure = false;
+  const from = env.SMTP_FROM?.trim() || undefined;
+  return { host, port: validPort, user, pass, from, secure };
+}
+
+/**
+ * Pick the digest transport based on env. SMTP wins when SMTP_HOST + valid
+ * creds are present; otherwise we fall back to the stdout
+ * `ConsoleEmailSender`. Mirrors `content-engine/src/jobs/rejectionDigestEmail.ts`'s
+ * `selectDigestSender` shape so the two empires stay consistent.
+ */
+export function selectAlertAuditDigestSender(
+  env: NodeJS.ProcessEnv = process.env,
+  opts: { transporterFactory?: (config: AlertAuditDigestSmtpConfig) => AlertAuditDigestSmtpTransporterLike } = {},
+): EmailSender {
+  const smtpConfig = readAlertAuditDigestSmtpConfigFromEnv(env);
+  if (smtpConfig) {
+    return new SmtpAlertAuditDigestSender({
+      config: smtpConfig,
+      transporterFactory: opts.transporterFactory,
+    });
+  }
+  return new ConsoleEmailSender();
 }

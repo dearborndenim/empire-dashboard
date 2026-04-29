@@ -990,4 +990,21 @@ html, body {
   cursor: pointer;
 }
 .alert-audit__saved-views-delete:hover { background: #4a2727; }
+.alert-audit__saved-views-rename {
+  font-size: 12px;
+  padding: 3px 8px;
+  margin-right: 6px;
+  background: #1f2c3b;
+  color: #87b3f0;
+  border: 1px solid #2c455a;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.alert-audit__saved-views-rename:hover { background: #27384a; }
 .alert-audit__saved-views-status { font-size: 12px; color: #c5c8cd; }
+.alert-audit__saved-view-count {
+  font-size: 11px;
+  color: #8a93a3;
+  margin-left: 4px;
+}
+.alert-audit__saved-view-count--err { color: #c98a4a; }

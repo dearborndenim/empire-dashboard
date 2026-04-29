@@ -553,8 +553,19 @@ export interface RenderAlertAuditPageOptions {
    * views. Rendered as a sidebar/dropdown of click-through links so the
    * operator can recall common queries in one click. Undefined / empty omits
    * the section entirely.
+   *
+   * Alert audit polish 4 (2026-04-28): each view may carry an optional
+   * `count` field — when present, rendered as a "(N)" badge next to the
+   * view's name so an operator can see at-a-glance how busy each filter
+   * currently is. `count: null` indicates the count failed to compute and
+   * is rendered as "(?)" so the row stays visible.
    */
-  savedViews?: Array<{ id: number; name: string; query_string: string }>;
+  savedViews?: Array<{
+    id: number;
+    name: string;
+    query_string: string;
+    count?: number | null;
+  }>;
 }
 
 /**
@@ -588,7 +599,9 @@ export function buildAlertAuditPageHref(
  * Empty list omits the section entirely so we don't add layout shift.
  */
 function renderAlertAuditSavedViewsSidebar(
-  views: Array<{ id: number; name: string; query_string: string }> | undefined,
+  views:
+    | Array<{ id: number; name: string; query_string: string; count?: number | null }>
+    | undefined,
 ): string {
   const list = views ?? [];
   if (list.length === 0) {
@@ -605,8 +618,18 @@ function renderAlertAuditSavedViewsSidebar(
       const name = escapeHtml(v.name);
       const qs = (v.query_string ?? '').replace(/^\?+/, '');
       const href = qs ? `/alerts/audit?${qs}` : `/alerts/audit`;
+      // Polish 4 (2026-04-28): per-view match-count badge. We escapeHtml the
+      // numeric/null badge text defensively even though the inputs are
+      // numeric — the renderer should never trust upstream data shapes.
+      let badgeHtml = '';
+      if (v.count === null) {
+        badgeHtml = ` <span class="alert-audit__saved-view-count alert-audit__saved-view-count--err" aria-label="count unavailable">(?)</span>`;
+      } else if (typeof v.count === 'number' && Number.isFinite(v.count)) {
+        const safeCount = Math.max(0, Math.floor(v.count));
+        badgeHtml = ` <span class="alert-audit__saved-view-count">(${escapeHtml(String(safeCount))})</span>`;
+      }
       return `<li class="alert-audit__saved-view-item">
-        <a class="alert-audit__saved-view-link" href="${escapeHtml(href)}" title="${escapeHtml(qs || '(no filters)')}">${name}</a>
+        <a class="alert-audit__saved-view-link" href="${escapeHtml(href)}" title="${escapeHtml(qs || '(no filters)')}">${name}</a>${badgeHtml}
       </li>`;
     })
     .join('');
@@ -654,6 +677,7 @@ export function renderAlertAuditSavedViewsPage(
             <td class="alert-audit__saved-views-cell"><code>${escapeHtml(qs || '(no filters)')}</code></td>
             <td class="alert-audit__saved-views-cell">${escapeHtml(v.created_at)}</td>
             <td class="alert-audit__saved-views-cell">
+              <button type="button" class="alert-audit__saved-views-rename" data-view-id="${v.id}" data-view-name="${escapeHtml(v.name)}">rename</button>
               <button type="button" class="alert-audit__saved-views-delete" data-view-id="${v.id}">delete</button>
             </td>
           </tr>`;
@@ -754,6 +778,31 @@ ${rows}
       }).then(function(r){
         if (r.ok || r.status === 204) { window.location.reload(); }
         else if (statusEl) statusEl.textContent = 'error ' + r.status;
+      }).catch(function(){ if (statusEl) statusEl.textContent = 'network error'; });
+    });
+  });
+  document.querySelectorAll('button.alert-audit__saved-views-rename').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var id = btn.getAttribute('data-view-id');
+      var current = btn.getAttribute('data-view-name') || '';
+      if (!id) return;
+      var token = getAdminToken();
+      if (!token) { if (statusEl) statusEl.textContent = 'token required'; return; }
+      var next = window.prompt('Rename saved view:', current);
+      if (next === null) return;
+      next = (next || '').trim();
+      if (!next) { if (statusEl) statusEl.textContent = 'name required'; return; }
+      fetch('/alerts/audit/views/' + encodeURIComponent(id), {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', 'x-admin-token': token },
+        body: JSON.stringify({ name: next })
+      }).then(function(r){
+        if (r.ok) { window.location.reload(); }
+        else if (statusEl) {
+          r.json().then(function(j){ statusEl.textContent = (j && j.error) || ('error ' + r.status); }).catch(function(){
+            statusEl.textContent = 'error ' + r.status;
+          });
+        }
       }).catch(function(){ if (statusEl) statusEl.textContent = 'network error'; });
     });
   });

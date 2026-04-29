@@ -198,6 +198,7 @@ describe('collectStatuses with history', () => {
       createAlertAuditSavedView: jest.fn(() => ({ id: 1, name: 'x', query_string: '', created_at: '2026-04-27T00:00:00.000Z' })),
       listAlertAuditSavedViews: jest.fn(() => []),
       deleteAlertAuditSavedView: jest.fn(() => false),
+      renameAlertAuditSavedView: jest.fn(() => null),
       close: jest.fn(),
     };
     const enriched = { ...deps, historyStore: throwingStore };

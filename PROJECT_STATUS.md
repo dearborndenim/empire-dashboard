@@ -7,9 +7,56 @@ touched. Yellow = up but idle. Red = down. Minimal, clean, fast — a v1
 monitor that we can layer features onto (alerting, incident history,
 per-user views) as the empire grows.
 
-## Current state — 93% (2026-04-27)
+## Current state — 94% (2026-04-28)
+
+### 2026-04-28 — Alert audit UI polish 4
+- **Saved-view UX**:
+  * `PATCH /alerts/audit/views/:id` (and `PUT` alias) renames a view in
+    place. Returns 200 + updated row on success, 404 on unknown id, 409 on
+    UNIQUE-name collision (mapped from the SQLite constraint error), 400
+    on empty/oversize name or non-numeric id, 401 wrong token, 503 token
+    unset. New `HistoryStore.renameAlertAuditSavedView(id, newName)`
+    method on the SQLite store + interface.
+  * Inline `confirm()` JS prompt fires before DELETE on the management
+    page (already wired in polish 3 — left unchanged).
+  * Per-saved-view count badge renders next to each view's name in the
+    `/alerts/audit` sidebar — `(N)` for known counts, `(?)` if the
+    underlying count call threw. Backed by the new
+    `src/savedViewCounts.ts` helper which parses the stored
+    `query_string` into an `AlertAuditQuery` (using the same field rules
+    as `buildAlertAuditQueryFromReq`) and calls `countAlertAudits()`.
+    Results are cached in-process for 60s via a `SavedViewCountCache`
+    instance keyed on the verbatim query string. Cache cleared on
+    rename/delete to keep the badge fresh.
+  * Management page `/alerts/audit/views` now shows a "rename" button
+    next to each delete button — clicking it triggers a `prompt()` for
+    the new name and PATCHes the row.
+- **Per-actor digest "Your saved views" section**:
+  * `BuildPerActorDigestsOptions.includeSavedViews` (default false for
+    legacy back-compat) opts in. When enabled, every per-actor payload
+    carries a `data.savedViews: AlertAuditDigestSavedViewRow[]` rollup
+    with the current global match count per saved view (the data lookup
+    is global since saved views aren't per-actor today).
+  * `renderAlertAuditDigestText` and `renderAlertAuditDigestHtml` render
+    the new section under the existing top-integrations table. HTML
+    output is XSS-safe — every user-supplied name + query_string passes
+    through `escapeHtml`. Empty list renders the friendly "no saved
+    views configured" placeholder. Stays opt-in via the existing
+    `ALERT_AUDIT_PER_ACTOR_DIGEST=1` env (no behaviour change).
+- **Tests** — +10 jest tests on `tests/alertAuditPolish4.test.ts`:
+    rename happy path + PUT alias + persistence, 404 + 409 + 400 + 401,
+    `SavedViewCountCache` TTL memoization, count=null on
+    countAlertAudits throw, `parseAlertAuditQueryString` clamps
+    days/decision/actor, count badge renders on `/alerts/audit`, per-actor
+    payload `savedViews` rollup w/ correct match counts, legacy
+    back-compat (omitted when option not set), XSS-safe escaping on
+    `<script>` names, empty saved-view placeholder. Total tests now 461
+    (was 451). The 2 pre-existing `historyStore.integrationStats.test.ts`
+    flakes are unchanged and unrelated.
+
+### 2026-04-27
 - Alert audit UI polish 3 — saved views + per-actor digest + SMTP adapter
-  (this session):
+  (prior session):
   * **Saved audit-filter views** — `alert_audit_saved_views` SQLite table
     (id, name UNIQUE, query_string, created_at) + idempotent `CREATE IF
     NOT EXISTS`. New `HistoryStore` methods `createAlertAuditSavedView()` /

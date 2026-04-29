@@ -22,6 +22,10 @@ import {
 import { bucketsToSparkline, formatUptimePercent } from './sparkline';
 import { IncidentTracker } from './incidentTracker';
 import { IntegrationTilesFetcher, IntegrationTile } from './integrationTiles';
+import {
+  computeSavedViewCounts,
+  defaultSavedViewCountCache,
+} from './savedViewCounts';
 
 export interface AppDeps {
   config: RuntimeConfig;
@@ -692,13 +696,25 @@ export function createApp(deps: AppDeps): Express {
       });
       const totalMatched = deps.historyStore.countAlertAudits(query);
       // Alert audit polish 3 (2026-04-27): saved filter views sidebar.
-      let savedViews: Array<{ id: number; name: string; query_string: string }> = [];
+      // Polish 4 (2026-04-28): per-view match-count badges (60s in-memory
+      // cache).
+      let savedViews: Array<{
+        id: number;
+        name: string;
+        query_string: string;
+        count?: number | null;
+      }> = [];
       try {
-        savedViews = deps.historyStore.listAlertAuditSavedViews().map((v) => ({
+        const baseViews = deps.historyStore.listAlertAuditSavedViews().map((v) => ({
           id: v.id,
           name: v.name,
           query_string: v.query_string,
         }));
+        savedViews = computeSavedViewCounts({
+          store: deps.historyStore,
+          views: baseViews,
+          cache: defaultSavedViewCountCache,
+        });
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error('[empire-dashboard] saved-views read failed:', err);
@@ -833,6 +849,10 @@ export function createApp(deps: AppDeps): Express {
         res.status(404).json({ error: 'saved view not found' });
         return;
       }
+      // Invalidate any cached count for this id's stored query string. We
+      // don't have the row anymore, so we just clear the whole cache —
+      // it's small and refills cheaply.
+      defaultSavedViewCountCache.clear();
       res.status(204).end();
     } catch (err) {
       res.status(500).json({
@@ -840,6 +860,66 @@ export function createApp(deps: AppDeps): Express {
       });
     }
   });
+
+  /**
+   * Alert audit polish 4 (2026-04-28): rename a saved view in place. Both
+   * PATCH and PUT route to the same handler so curl/scripts can use either
+   * verb. 404 when the id doesn't exist; 409 on duplicate-name UNIQUE
+   * violation; 400 on missing/oversized name.
+   */
+  const renameSavedViewHandler = (req: Request, res: Response): void => {
+    try {
+      if (!deps.historyStore) {
+        res.status(503).json({ error: 'history store unavailable' });
+        return;
+      }
+      if (!requireAdminToken(req, res, deps.incidentsAdminToken)) return;
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        res.status(400).json({ error: 'invalid view id' });
+        return;
+      }
+      const body = (req.body ?? {}) as { name?: unknown };
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      if (!name) {
+        res.status(400).json({ error: 'name is required' });
+        return;
+      }
+      if (name.length > 64) {
+        res.status(400).json({ error: 'name exceeds 64 characters' });
+        return;
+      }
+      try {
+        const updated = deps.historyStore.renameAlertAuditSavedView(id, name);
+        if (!updated) {
+          res.status(404).json({ error: 'saved view not found' });
+          return;
+        }
+        // Names are display-only — the cached count is keyed on the query
+        // string which didn't change — but clear anyway to be safe.
+        defaultSavedViewCountCache.clear();
+        res.status(200).json({
+          id: updated.id,
+          name: updated.name,
+          query_string: updated.query_string,
+          created_at: updated.created_at,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/UNIQUE constraint/i.test(msg) || /SQLITE_CONSTRAINT/i.test(msg)) {
+          res.status(409).json({ error: 'a saved view with that name already exists' });
+          return;
+        }
+        throw err;
+      }
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+  app.patch('/alerts/audit/views/:id', renameSavedViewHandler);
+  app.put('/alerts/audit/views/:id', renameSavedViewHandler);
 
   /** CSV export companion to /alerts/audit. Same filters + same auth gate. */
   app.get('/alerts/audit.csv', (req, res) => {

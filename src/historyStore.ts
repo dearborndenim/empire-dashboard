@@ -386,6 +386,12 @@ export interface HistoryStore {
    * the id wasn't found.
    */
   deleteAlertAuditSavedView(id: number): boolean;
+  /**
+   * Alert audit polish 4 (2026-04-28): rename a saved view in-place. Returns
+   * the updated row, or null when no row with that id exists. Throws when the
+   * new name collides with an existing view (callers map to 409).
+   */
+  renameAlertAuditSavedView(id: number, newName: string): AlertAuditSavedViewRow | null;
   close(): void;
 }
 
@@ -1279,6 +1285,29 @@ export class SqliteHistoryStore implements HistoryStore {
       .prepare('DELETE FROM alert_audit_saved_views WHERE id = ?')
       .run(id);
     return result.changes > 0;
+  }
+
+  /**
+   * Alert audit polish 4 (2026-04-28): rename a saved view by id. Returns the
+   * updated row, or null when the row does not exist. UNIQUE name violations
+   * propagate as the underlying SQLite constraint error so the caller can map
+   * to 409.
+   */
+  renameAlertAuditSavedView(
+    id: number,
+    newName: string,
+  ): AlertAuditSavedViewRow | null {
+    const cleanName = (newName ?? '').trim().slice(0, 64);
+    const existing = this.db
+      .prepare(
+        'SELECT id, name, query_string, created_at FROM alert_audit_saved_views WHERE id = ?',
+      )
+      .get(id) as AlertAuditSavedViewRow | undefined;
+    if (!existing) return null;
+    this.db
+      .prepare('UPDATE alert_audit_saved_views SET name = ? WHERE id = ?')
+      .run(cleanName, id);
+    return { ...existing, name: cleanName };
   }
 
   close(): void {

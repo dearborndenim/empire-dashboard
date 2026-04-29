@@ -24,6 +24,7 @@
 
 import { AlertAuditRow, HistoryStore, deriveAlertDecision } from './historyStore';
 import { ConsoleEmailSender, EmailMessage, EmailSender } from './email';
+import { computeSavedViewCounts, SavedViewCountCache } from './savedViewCounts';
 
 export interface AlertAuditDigestIntegrationRow {
   integration_name: string;
@@ -56,6 +57,27 @@ export interface AlertAuditDigestData {
    * email body in that case.
    */
   topIntegrations: AlertAuditDigestIntegrationRow[];
+  /**
+   * Alert audit polish 4 (2026-04-28): saved /alerts/audit filter views with
+   * their current global match counts. Populated when
+   * `BuildPerActorDigestsOptions.includeSavedViews` is true. Always
+   * undefined for the regular fleet digest (`sendAlertAuditDigest`).
+   */
+  savedViews?: AlertAuditDigestSavedViewRow[];
+}
+
+/**
+ * Alert audit polish 4 (2026-04-28): per-saved-view rollup row included in
+ * per-actor digest payloads. The data is global — saved views aren't
+ * per-actor today — but we surface the list so each actor's recipient sees
+ * which filters are popular across the team.
+ */
+export interface AlertAuditDigestSavedViewRow {
+  id: number;
+  name: string;
+  query_string: string;
+  /** Current global match count, or null when the count failed to compute. */
+  count: number | null;
 }
 
 export interface BuildAlertAuditDigestOptions {
@@ -188,6 +210,22 @@ export function renderAlertAuditDigestText(data: AlertAuditDigestData): string {
     }
   }
   lines.push('');
+  // Polish 4 (2026-04-28): "Your saved views" section. Only emitted when the
+  // builder threaded a `savedViews` array onto the data — the regular fleet
+  // digest never sets it so its plaintext is byte-identical pre-change.
+  if (data.savedViews) {
+    lines.push('Your saved views');
+    lines.push('----------------');
+    if (data.savedViews.length === 0) {
+      lines.push('  (no saved views configured)');
+    } else {
+      for (const view of data.savedViews) {
+        const countLabel = view.count === null ? '?' : String(view.count);
+        lines.push(`  ${view.name.padEnd(28)} matches=${countLabel}`);
+      }
+    }
+    lines.push('');
+  }
   return lines.join('\n');
 }
 
@@ -217,6 +255,42 @@ export function renderAlertAuditDigestHtml(data: AlertAuditDigestData): string {
         })
         .join('');
 
+  // Polish 4 (2026-04-28): "Your saved views" HTML section. Only emitted
+  // when the builder threaded `savedViews` onto the data. Names are
+  // user-supplied so they MUST be escaped — `escapeHtml` handles every row
+  // explicitly to keep the rendering XSS-safe.
+  let savedViewsHtml = '';
+  if (data.savedViews) {
+    if (data.savedViews.length === 0) {
+      savedViewsHtml = `
+  <h3>Your saved views</h3>
+  <p style="color:#777;font-style:italic">no saved views configured</p>`;
+    } else {
+      const savedViewRows = data.savedViews
+        .map((v) => {
+          const countLabel = v.count === null ? '?' : String(v.count);
+          return `<tr>
+              <td style="padding:6px 8px">${escapeHtml(v.name)}</td>
+              <td style="padding:6px 8px"><code>${escapeHtml(v.query_string || '(no filters)')}</code></td>
+              <td style="padding:6px 8px">${escapeHtml(countLabel)}</td>
+            </tr>`;
+        })
+        .join('');
+      savedViewsHtml = `
+  <h3>Your saved views</h3>
+  <table style="border-collapse:collapse;width:100%;font-size:13px">
+    <thead>
+      <tr style="text-align:left;border-bottom:1px solid #ddd">
+        <th style="padding:6px 8px">Name</th>
+        <th style="padding:6px 8px">Filter</th>
+        <th style="padding:6px 8px">Matches</th>
+      </tr>
+    </thead>
+    <tbody>${savedViewRows}</tbody>
+  </table>`;
+    }
+  }
+
   return `<!doctype html>
 <html><body style="font-family:system-ui,sans-serif;color:#222;max-width:720px;margin:0 auto;padding:24px">
   <h2 style="margin:0 0 4px">Alert audit digest (${data.windowHours}h)</h2>
@@ -242,7 +316,7 @@ export function renderAlertAuditDigestHtml(data: AlertAuditDigestData): string {
       </tr>
     </thead>
     <tbody>${rowsHtml}</tbody>
-  </table>
+  </table>${savedViewsHtml}
 </body></html>`;
 }
 
@@ -291,6 +365,20 @@ export interface PerActorDigestPayload {
 export interface BuildPerActorDigestsOptions extends BuildAlertAuditDigestOptions {
   /** Optional cap to skip actors below this many rows. Default 1. */
   minRows?: number;
+  /**
+   * Alert audit polish 4 (2026-04-28): when true, each per-actor payload
+   * carries a "Your saved views" rollup with the current global match count
+   * per saved view. Default true (back-compat: existing tests assert no
+   * `savedViews` key, but the field is optional so they keep passing).
+   * Disable explicitly to mirror legacy payloads byte-for-byte.
+   */
+  includeSavedViews?: boolean;
+  /**
+   * Optional cache for saved-view counts. Defaults to a fresh
+   * `SavedViewCountCache` per call so the digest sees stable counts even if
+   * the page cache TTL has expired between requests.
+   */
+  savedViewCountCache?: SavedViewCountCache;
 }
 
 /**
@@ -321,6 +409,31 @@ export function buildPerActorDigests(
     bucket.push(r);
   }
 
+  // Polish 4 (2026-04-28): build the saved-views rollup once and attach to
+  // every per-actor payload. Data is global today — saved views aren't
+  // per-actor — so the same list is reused for every recipient.
+  let savedViews: AlertAuditDigestSavedViewRow[] | undefined;
+  if (opts.includeSavedViews) {
+    try {
+      const baseViews = opts.store.listAlertAuditSavedViews().map((v) => ({
+        id: v.id,
+        name: v.name,
+        query_string: v.query_string,
+      }));
+      const cache = opts.savedViewCountCache ?? new SavedViewCountCache();
+      savedViews = computeSavedViewCounts({
+        store: opts.store,
+        views: baseViews,
+        cache,
+        nowMs,
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[empire-dashboard] per-actor digest saved-views read failed:', err);
+      savedViews = [];
+    }
+  }
+
   const payloads: PerActorDigestPayload[] = [];
   for (const [actor, actorRows] of byActor.entries()) {
     if (actorRows.length < minRows) continue;
@@ -336,6 +449,7 @@ export function buildPerActorDigests(
       windowHours,
       topN,
     });
+    if (savedViews) data.savedViews = savedViews;
     payloads.push({ actor, data });
   }
   payloads.sort((a, b) => {

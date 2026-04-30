@@ -53,7 +53,9 @@ describe('IntegrationTilesFetcher', () => {
       fetchImpl: async () => { throw new Error('should not call fetch'); },
     });
     const tiles = await fetcher.getTiles();
-    expect(tiles).toHaveLength(4);
+    // 5 tiles: po-receiver, kanban, content-engine, scene-drift,
+    // auto-pause-history (added 2026-04-29).
+    expect(tiles).toHaveLength(5);
     expect(tiles.every((t) => t.state === 'not-configured')).toBe(true);
     for (const t of tiles) expect(t.summary).toBe('Not configured');
   });

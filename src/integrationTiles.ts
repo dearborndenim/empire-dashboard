@@ -31,7 +31,7 @@ export interface IntegrationTile {
   id: string;
   title: string;
   /** High-level state the UI renders styling for. */
-  state: 'ok' | 'warn' | 'error' | 'not-configured';
+  state: 'ok' | 'warn' | 'error' | 'critical' | 'not-configured';
   /**
    * Short one-line summary (e.g. "98.4% — 2 dead-lettered").
    * The UI renders this under the title.
@@ -59,6 +59,52 @@ export interface IntegrationTile {
    * flag_classification entirely (legacy fallback path).
    */
   classificationCounts?: FlagClassificationCounts;
+  /**
+   * Auto-pause history sparkline (2026-04-29): 24-bucket per-hour
+   * paused/resumed counts for the strict-mode auto-pause feature in
+   * content-engine. Rendered as a small inline sparkline on the
+   * "Auto-pause history (24h)" tile. Undefined for tiles that don't
+   * carry the data.
+   */
+  autoPauseSparkline?: AutoPauseSparklineData;
+  /**
+   * Auto-pause history (2026-04-29): optional explicit click-through
+   * href the renderer should use to wrap the tile in. When undefined the
+   * tile renders un-clickable (legacy behaviour for older tiles).
+   */
+  href?: string;
+}
+
+/**
+ * Auto-pause history sparkline payload (2026-04-29). Mirrors the shape
+ * content-engine's `buildAutoPauseSparkline()` returns, but constructed
+ * locally inside the empire-dashboard from the raw events array exposed
+ * by `GET /api/integration/strict-mode-auto-pause-history?days=N`.
+ */
+export interface AutoPauseSparklinePoint {
+  /** UTC hour-snapped ISO timestamp. */
+  hourIso: string;
+  /** Count of `paused` transitions in this hour bucket. */
+  paused: number;
+  /** Count of `resumed` transitions in this hour bucket. */
+  resumed: number;
+}
+
+export interface AutoPauseSparklineData {
+  /** 24 buckets (one per hour), oldest → newest, stable shape. */
+  points: AutoPauseSparklinePoint[];
+  /** Number of `paused` transitions in the window. */
+  totalPauses: number;
+  /** Timestamp of the most-recent `paused` transition in the window, or null. */
+  lastPausedAt: string | null;
+  /** Timestamp of the most-recent `resumed` transition in the window, or null. */
+  lastResumedAt: string | null;
+  /**
+   * True when the strict-mode pipeline is currently paused — i.e. the
+   * latest `paused` event has no matching `resumed` after it. Drives the
+   * tile's `critical` state.
+   */
+  currentlyPaused: boolean;
 }
 
 export interface IntegrationFetchImpl {
@@ -139,6 +185,7 @@ export class IntegrationTilesFetcher {
       fetchKanbanTile(this.config, this.fetchImpl),
       fetchContentEngineTile(this.config, this.fetchImpl),
       fetchSceneDriftTile(this.config, this.fetchImpl),
+      fetchAutoPauseHistoryTile(this.config, this.fetchImpl, this.now),
     ]);
     if (this.sparklineResolver) {
       for (const tile of tiles) {
@@ -451,6 +498,179 @@ async function fetchSceneDriftTile(
       err instanceof Error ? err.message : String(err),
     );
   }
+}
+
+/**
+ * Auto-pause history tile (2026-04-29). Reads content-engine's
+ * `GET /api/integration/strict-mode-auto-pause-history?days=1` endpoint and
+ * renders a 24-bucket per-hour sparkline of `paused` / `resumed` transition
+ * counts plus the totals + last-pause-at / last-resume-at timestamps.
+ *
+ * State:
+ *   ok       — zero `paused` events in the trailing 24h window.
+ *   warn     — at least one `paused` event in the window AND we're not
+ *              currently paused (i.e. the latest `paused` was followed by a
+ *              matching `resumed`).
+ *   critical — currently paused (latest event is `paused` with no later
+ *              `resumed`, OR `lastPausedAt` is set with `lastResumedAt`
+ *              null).
+ */
+async function fetchAutoPauseHistoryTile(
+  config: IntegrationTilesConfig,
+  fetchImpl: IntegrationFetchImpl,
+  nowFn: () => number,
+): Promise<IntegrationTile> {
+  const id = 'auto-pause-history';
+  const title = 'Auto-pause history (24h)';
+  if (!config.contentEngineUrl || !config.contentEngineApiKey) {
+    return notConfigured(id, title);
+  }
+  const url = `${stripTrailing(config.contentEngineUrl)}/api/integration/strict-mode-auto-pause-history?days=1`;
+  try {
+    const res = await fetchImpl(url, {
+      headers: { 'x-api-key': config.contentEngineApiKey },
+    });
+    if (!res.ok) {
+      return errorTile(id, title, `HTTP ${res.status}`);
+    }
+    const body = (await res.json()) as Record<string, unknown>;
+    const eventsRaw = Array.isArray(body.events) ? (body.events as unknown[]) : [];
+    const events = eventsRaw
+      .map(parseAutoPauseEvent)
+      .filter((e): e is AutoPauseEvent => e !== null);
+    const data = buildAutoPauseSparkline(events, 24 * 60 * 60 * 1000, nowFn());
+    const state: IntegrationTile['state'] = data.currentlyPaused
+      ? 'critical'
+      : data.totalPauses > 0
+        ? 'warn'
+        : 'ok';
+    const summary = data.currentlyPaused
+      ? `Paused now · ${data.totalPauses} pause${data.totalPauses === 1 ? '' : 's'} in 24h`
+      : data.totalPauses === 0
+        ? 'No pauses in 24h'
+        : `${data.totalPauses} pause${data.totalPauses === 1 ? '' : 's'} in 24h (resumed)`;
+    const details: IntegrationTile['details'] = [];
+    details.push({ label: 'Total pauses', value: String(data.totalPauses) });
+    if (data.lastPausedAt) {
+      details.push({ label: 'Last paused', value: data.lastPausedAt });
+    }
+    if (data.lastResumedAt) {
+      details.push({ label: 'Last resumed', value: data.lastResumedAt });
+    }
+    const tile: IntegrationTile = {
+      id,
+      title,
+      state,
+      summary,
+      details,
+      autoPauseSparkline: data,
+      href: '/alerts/audit?integration=content-engine&decision=fire&days=7',
+    };
+    return tile;
+  } catch (err) {
+    return errorTile(id, title, err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** One auto-pause event row from the content-engine response. */
+interface AutoPauseEvent {
+  ts_ms: number;
+  transition: 'paused' | 'resumed';
+  reason: string | null;
+}
+
+function parseAutoPauseEvent(raw: unknown): AutoPauseEvent | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const ts = pickNumber(r, ['ts_ms', 'tsMs']);
+  if (ts === null) return null;
+  const t = r.transition;
+  if (t !== 'paused' && t !== 'resumed') return null;
+  const reasonRaw = r.reason;
+  const reason = typeof reasonRaw === 'string' ? reasonRaw : null;
+  return { ts_ms: ts, transition: t, reason };
+}
+
+/**
+ * Format auto-pause events into a 24-bucket sparkline payload mirroring
+ * content-engine's `buildAutoPauseSparkline()`. Pure / defensive:
+ *   - Future-dated events (ts_ms > nowMs) are dropped.
+ *   - Events with unknown transitions are dropped (forward-compat).
+ *   - Negative or zero windowMs is clamped to a single hour.
+ *   - `currentlyPaused` is true when the most-recent event in the window
+ *     is a `paused` (no later `resumed`). Also true when `lastPausedAt`
+ *     exists and `lastResumedAt` is null OR is older than `lastPausedAt`.
+ */
+const HOUR_MS = 60 * 60 * 1000;
+
+function floorToHour(ms: number): number {
+  return Math.floor(ms / HOUR_MS) * HOUR_MS;
+}
+
+export function buildAutoPauseSparkline(
+  events: AutoPauseEvent[],
+  windowMs: number,
+  nowMs: number,
+): AutoPauseSparklineData {
+  const safeWindowMs = Math.max(HOUR_MS, windowMs | 0);
+  const hourCount = Math.max(1, Math.floor(safeWindowMs / HOUR_MS));
+  const nowHour = floorToHour(nowMs);
+  const oldestHour = nowHour - (hourCount - 1) * HOUR_MS;
+
+  const pausedCounts = new Map<number, number>();
+  const resumedCounts = new Map<number, number>();
+  for (let i = hourCount - 1; i >= 0; i--) {
+    const hourStart = nowHour - i * HOUR_MS;
+    pausedCounts.set(hourStart, 0);
+    resumedCounts.set(hourStart, 0);
+  }
+
+  let totalPauses = 0;
+  let lastPausedMs: number | null = null;
+  let lastResumedMs: number | null = null;
+
+  for (const ev of events) {
+    if (ev.ts_ms < oldestHour) continue;
+    if (ev.ts_ms > nowMs) continue;
+    const key = Math.min(floorToHour(ev.ts_ms), nowHour);
+    if (ev.transition === 'paused') {
+      pausedCounts.set(key, (pausedCounts.get(key) ?? 0) + 1);
+      totalPauses++;
+      if (lastPausedMs === null || ev.ts_ms > lastPausedMs) {
+        lastPausedMs = ev.ts_ms;
+      }
+    } else if (ev.transition === 'resumed') {
+      resumedCounts.set(key, (resumedCounts.get(key) ?? 0) + 1);
+      if (lastResumedMs === null || ev.ts_ms > lastResumedMs) {
+        lastResumedMs = ev.ts_ms;
+      }
+    }
+  }
+
+  const points: AutoPauseSparklinePoint[] = [];
+  for (let i = hourCount - 1; i >= 0; i--) {
+    const hourStart = nowHour - i * HOUR_MS;
+    points.push({
+      hourIso: new Date(hourStart).toISOString(),
+      paused: pausedCounts.get(hourStart) ?? 0,
+      resumed: resumedCounts.get(hourStart) ?? 0,
+    });
+  }
+
+  // Currently-paused logic: if there's a paused event but no resumed
+  // event at all, OR the latest paused is more recent than the latest
+  // resumed, then we treat the pipeline as paused.
+  const currentlyPaused =
+    lastPausedMs !== null &&
+    (lastResumedMs === null || lastPausedMs > lastResumedMs);
+
+  return {
+    points,
+    totalPauses,
+    lastPausedAt: lastPausedMs !== null ? new Date(lastPausedMs).toISOString() : null,
+    lastResumedAt: lastResumedMs !== null ? new Date(lastResumedMs).toISOString() : null,
+    currentlyPaused,
+  };
 }
 
 interface SceneDriftScene {

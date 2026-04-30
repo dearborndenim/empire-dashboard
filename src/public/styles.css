@@ -268,8 +268,11 @@ html, body {
 
 .tile--ok { border-color: #1e3a2b; }
 .tile--warn { border-color: #4a3a10; }
+.tile--critical { border-color: #6a1313; background: #1a0e0e; }
 .tile--error { border-color: #4a1e1e; }
 .tile--not-configured { border-color: #1f242b; opacity: 0.7; }
+.tile--linked { display: block; text-decoration: none; color: inherit; cursor: pointer; }
+.tile--linked:hover { filter: brightness(1.15); }
 
 .tile__title {
   font-weight: 600;
@@ -343,6 +346,27 @@ html, body {
 .tile__spark-bar--green { background: #42d67c; }
 .tile__spark-bar--yellow { background: #f4c13a; }
 .tile__spark-bar--red { background: #f26d6d; }
+
+/* Auto-pause history sparkline (2026-04-29). */
+.tile__pause-spark {
+  display: flex;
+  gap: 2px;
+  margin-top: 8px;
+  height: 14px;
+  align-items: flex-end;
+}
+
+.tile__pause-bar {
+  flex: 1;
+  height: 100%;
+  border-radius: 2px;
+  background: #2a2e34;
+  opacity: 0.7;
+}
+
+.tile__pause-bar--paused { background: #f26d6d; opacity: 1; }
+.tile__pause-bar--resumed { background: #42d67c; opacity: 1; }
+.tile__pause-bar--quiet { background: #2a2e34; opacity: 0.55; }
 
 .prune-banner {
   margin-bottom: 18px;

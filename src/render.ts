@@ -288,6 +288,29 @@ function renderClassificationBadges(
   return `<div class="tile__badges" aria-label="flag classification counts">${items.join('')}</div>`;
 }
 
+/**
+ * Auto-pause sparkline (2026-04-29): renders the 24-bucket per-hour
+ * paused/resumed mini-bar inside the auto-pause history tile. Each bucket
+ * gets a CSS modifier class (`--paused`, `--resumed`, `--quiet`) the
+ * stylesheet colorizes. Defensive: silently no-ops on missing data so
+ * older tiles render unchanged.
+ */
+function renderAutoPauseSparkline(
+  data: IntegrationTile['autoPauseSparkline'],
+): string {
+  if (!data || !Array.isArray(data.points) || data.points.length === 0) return '';
+  const bars = data.points
+    .map((p) => {
+      const paused = Number.isFinite(p.paused) && p.paused > 0 ? p.paused : 0;
+      const resumed = Number.isFinite(p.resumed) && p.resumed > 0 ? p.resumed : 0;
+      const variant = paused > 0 ? 'paused' : resumed > 0 ? 'resumed' : 'quiet';
+      const title = `${escapeHtml(p.hourIso)} · paused=${paused} resumed=${resumed}`;
+      return `<span class="tile__pause-bar tile__pause-bar--${variant}" title="${title}" aria-hidden="true"></span>`;
+    })
+    .join('');
+  return `<div class="tile__pause-spark" role="img" aria-label="Auto-pause history (24h)">${bars}</div>`;
+}
+
 function renderIntegrationTiles(tiles: IntegrationTile[] | undefined): string {
   if (!tiles || tiles.length === 0) return '';
   const cards = tiles
@@ -312,14 +335,25 @@ function renderIntegrationTiles(tiles: IntegrationTile[] | undefined): string {
         ? `<div class="tile__error">${escapeHtml(tile.error)}</div>`
         : '';
       const sparkBlock = renderTileSparkline(tile.sparkline);
+      const pauseSparkBlock = renderAutoPauseSparkline(tile.autoPauseSparkline);
       const badgesBlock = renderClassificationBadges(tile.classificationCounts);
-      return `<div class="${stateClass}">
-        <div class="tile__title">${title}</div>
+      const inner = `<div class="tile__title">${title}</div>
         <div class="tile__summary">${summary}</div>
         ${badgesBlock}
         ${detailsBlock}
+        ${pauseSparkBlock}
         ${sparkBlock}
-        ${errorBlock}
+        ${errorBlock}`;
+      // Auto-pause history (2026-04-29): tiles with an `href` wrap in <a>
+      // so the whole card is click-throughable. Other tiles render an
+      // un-clickable <div> (legacy behaviour preserved).
+      if (tile.href) {
+        return `<a class="${stateClass} tile--linked" href="${escapeHtml(tile.href)}">
+        ${inner}
+      </a>`;
+      }
+      return `<div class="${stateClass}">
+        ${inner}
       </div>`;
     })
     .join('\n');

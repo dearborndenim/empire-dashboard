@@ -7,7 +7,49 @@ touched. Yellow = up but idle. Red = down. Minimal, clean, fast — a v1
 monitor that we can layer features onto (alerting, incident history,
 per-user views) as the empire grows.
 
-## Current state — 94% (2026-04-28)
+## Current state — 94% (2026-04-30)
+
+### 2026-04-30 — Severity escalation sparkline tile (30d)
+- **New homepage tile "Severity escalations (30d)"** reads
+  content-engine's `GET /api/integration/strict-mode-severity-escalations
+  ?days=30` (Phase 7, already shipped) and renders a 30-bucket per-day
+  sparkline of strict UP-transitions across the {occasional, frequent,
+  chronic} severity ladder.
+- **State machine**:
+  * `ok`       — zero escalations in 30d window
+  * `warn`     — at least one escalation in 30d, but none in last 24h
+                 (calmed down)
+  * `critical` — at least one escalation in last 24h
+- **Click-through**: whole tile wraps in an `<a>` to
+  `/alerts/audit?integration=content-engine&decision=fire&days=30` so
+  clicking the tile lands directly on the relevant audit log filter.
+- **Pure helper**: exports a local
+  `buildSeverityEscalationSparkline(events, windowMs, nowMs)` mirroring
+  content-engine's Phase 8 helper shape — daily buckets oldest→newest,
+  count strict UP-transitions only, drop down-transitions / same-level /
+  future-skewed / unknown severity (forward-compat), `Math.trunc` +
+  finite-check + `Math.max(DAY_MS, …)` clamp (avoids the 32-bit
+  `windowMs | 0` overflow bug for ≥25-day windows that the auto-pause
+  tile inherited).
+- **Defensive XSS**: the tile NEVER surfaces raw upstream `reason` or
+  `scene` strings — only escalation counts + ISO timestamps. The full
+  reason history lives behind the click-through into the alert audit log.
+- **CSS**: new `.tile__esc-spark` + `.tile__esc-bar--{quiet,warn,
+  critical}` classes mirroring the auto-pause sparkline shape.
+- **Tests** — +18 jest tests on `tests/severityEscalationTile.test.ts`:
+  ok/warn/critical state branches, not-configured fallback, HTTP 503
+  error tile, network-throw error tile, future-skew + down-transition +
+  same-level + unknown-severity drops, click-through href correctness,
+  rendered `<a>` element in dashboard HTML, XSS escape on both `reason`
+  and `scene`, sparkline bar count (30 bars), and the pure helper window
+  clamping (negative/zero/non-finite/30-day no-overflow). Also bumps
+  `integrationTiles.test.ts` tile-count assertion from 5 → 6.
+- **Total tests**: 473 → 491 passing. 3 pre-existing baseline flakes
+  unchanged (`historyStore.integrationStats` x2 + `alertThrottlingPolish`
+  x1 — confirmed by stashing on bare main; same flakes as 2026-04-29).
+- **Env vars**: none new — reuses `CONTENT_ENGINE_URL` +
+  `CONTENT_ENGINE_API_KEY` already wired for content-engine, scene-drift,
+  and auto-pause-history tiles.
 
 ### 2026-04-28 — Alert audit UI polish 4
 - **Saved-view UX**:

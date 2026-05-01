@@ -68,6 +68,14 @@ export interface IntegrationTile {
    */
   autoPauseSparkline?: AutoPauseSparklineData;
   /**
+   * Severity escalation sparkline (2026-04-30): 30-bucket per-day
+   * count of strict-mode severity UP-transitions ({occasional, frequent,
+   * chronic}) on content-engine. Rendered as a small inline sparkline
+   * on the "Severity escalations (30d)" tile. Undefined for tiles that
+   * don't carry the data.
+   */
+  severityEscalationSparkline?: SeverityEscalationSparklineData;
+  /**
    * Auto-pause history (2026-04-29): optional explicit click-through
    * href the renderer should use to wrap the tile in. When undefined the
    * tile renders un-clickable (legacy behaviour for older tiles).
@@ -105,6 +113,29 @@ export interface AutoPauseSparklineData {
    * tile's `critical` state.
    */
   currentlyPaused: boolean;
+}
+
+/**
+ * Severity escalation sparkline payload (2026-04-30). Mirrors the shape
+ * content-engine's `buildSeverityEscalationSparkline()` returns, but
+ * constructed locally inside the empire-dashboard from the raw events
+ * array exposed by
+ * `GET /api/integration/strict-mode-severity-escalations?days=N`.
+ */
+export interface SeverityEscalationSparklinePoint {
+  /** UTC day-snapped ISO timestamp (start of day). */
+  dayIso: string;
+  /** Count of severity UP-transitions in this day bucket. */
+  escalations: number;
+}
+
+export interface SeverityEscalationSparklineData {
+  /** N buckets (one per day), oldest → newest, stable shape. */
+  points: SeverityEscalationSparklinePoint[];
+  /** Number of strict UP-transitions in the window. */
+  totalEscalations: number;
+  /** Timestamp of the most-recent UP-transition in the window, or null. */
+  lastEscalationAt: string | null;
 }
 
 export interface IntegrationFetchImpl {
@@ -186,6 +217,7 @@ export class IntegrationTilesFetcher {
       fetchContentEngineTile(this.config, this.fetchImpl),
       fetchSceneDriftTile(this.config, this.fetchImpl),
       fetchAutoPauseHistoryTile(this.config, this.fetchImpl, this.now),
+      fetchSeverityEscalationTile(this.config, this.fetchImpl, this.now),
     ]);
     if (this.sparklineResolver) {
       for (const tile of tiles) {
@@ -670,6 +702,203 @@ export function buildAutoPauseSparkline(
     lastPausedAt: lastPausedMs !== null ? new Date(lastPausedMs).toISOString() : null,
     lastResumedAt: lastResumedMs !== null ? new Date(lastResumedMs).toISOString() : null,
     currentlyPaused,
+  };
+}
+
+/**
+ * Severity escalation tile (2026-04-30). Reads content-engine's
+ * `GET /api/integration/strict-mode-severity-escalations?days=30` endpoint
+ * and renders a 30-bucket per-day sparkline of strict UP-transitions
+ * across the {occasional, frequent, chronic} severity ladder. Companion
+ * to the auto-pause history tile (Phase 6/8 endpoints, both bearer-auth
+ * gated via `INTEGRATION_API_KEY`).
+ *
+ * State:
+ *   ok       — zero escalations in the trailing 30d window.
+ *   warn     — at least one escalation in 30d, but none in the most
+ *              recent 24h (calmed down).
+ *   critical — at least one escalation in the trailing 24h.
+ */
+const ESCALATION_WINDOW_DAYS = 30;
+const ESCALATION_RECENT_24H_MS = 24 * 60 * 60 * 1000;
+
+async function fetchSeverityEscalationTile(
+  config: IntegrationTilesConfig,
+  fetchImpl: IntegrationFetchImpl,
+  nowFn: () => number,
+): Promise<IntegrationTile> {
+  const id = 'severity-escalation';
+  const title = 'Severity escalations (30d)';
+  if (!config.contentEngineUrl || !config.contentEngineApiKey) {
+    return notConfigured(id, title);
+  }
+  const url = `${stripTrailing(config.contentEngineUrl)}/api/integration/strict-mode-severity-escalations?days=${ESCALATION_WINDOW_DAYS}`;
+  try {
+    const res = await fetchImpl(url, {
+      headers: { 'x-api-key': config.contentEngineApiKey },
+    });
+    if (!res.ok) {
+      return errorTile(id, title, `HTTP ${res.status}`);
+    }
+    const body = (await res.json()) as Record<string, unknown>;
+    const eventsRaw = Array.isArray(body.events) ? (body.events as unknown[]) : [];
+    const events = eventsRaw
+      .map(parseSeverityEscalationEvent)
+      .filter((e): e is SeverityEscalationEvent => e !== null);
+    const nowMs = nowFn();
+    const data = buildSeverityEscalationSparkline(
+      events,
+      ESCALATION_WINDOW_DAYS * DAY_MS,
+      nowMs,
+    );
+    let state: IntegrationTile['state'] = 'ok';
+    if (data.totalEscalations > 0) state = 'warn';
+    if (
+      data.lastEscalationAt !== null &&
+      nowMs - Date.parse(data.lastEscalationAt) <= ESCALATION_RECENT_24H_MS
+    ) {
+      state = 'critical';
+    }
+    const summary =
+      data.totalEscalations === 0
+        ? 'No escalations in 30d'
+        : state === 'critical'
+          ? `${data.totalEscalations} escalation${data.totalEscalations === 1 ? '' : 's'} in 30d (recent)`
+          : `${data.totalEscalations} escalation${data.totalEscalations === 1 ? '' : 's'} in 30d`;
+    const details: IntegrationTile['details'] = [];
+    details.push({ label: 'Total escalations', value: String(data.totalEscalations) });
+    if (data.lastEscalationAt) {
+      details.push({ label: 'Last escalation', value: data.lastEscalationAt });
+    }
+    const tile: IntegrationTile = {
+      id,
+      title,
+      state,
+      summary,
+      details,
+      severityEscalationSparkline: data,
+      href: '/alerts/audit?integration=content-engine&decision=fire&days=30',
+    };
+    return tile;
+  } catch (err) {
+    return errorTile(id, title, err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** One severity-escalation event row from the content-engine response. */
+interface SeverityEscalationEvent {
+  ts_ms: number;
+  scene: string | null;
+  from_severity: string;
+  to_severity: string;
+  /**
+   * Raw upstream `reason` string — captured for parity with the upstream
+   * row shape but NEVER rendered into HTML by the tile (XSS guard).
+   */
+  reason: string | null;
+}
+
+function parseSeverityEscalationEvent(raw: unknown): SeverityEscalationEvent | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const ts = pickNumber(r, ['ts_ms', 'tsMs']);
+  if (ts === null) return null;
+  const fromRaw = r.from_severity ?? r.fromSeverity;
+  const toRaw = r.to_severity ?? r.toSeverity;
+  if (typeof fromRaw !== 'string' || typeof toRaw !== 'string') return null;
+  const sceneRaw = r.scene;
+  const reasonRaw = r.reason;
+  return {
+    ts_ms: ts,
+    scene: typeof sceneRaw === 'string' ? sceneRaw : null,
+    from_severity: fromRaw,
+    to_severity: toRaw,
+    reason: typeof reasonRaw === 'string' ? reasonRaw : null,
+  };
+}
+
+/**
+ * Severity ladder rank — copied locally so this module stays leaf-pure.
+ * Mirrors the rank table content-engine uses in
+ * `src/integration/hourlyHistogram.ts`.
+ */
+const SEVERITY_RANK: Record<string, number> = {
+  occasional: 0,
+  frequent: 1,
+  chronic: 2,
+};
+
+function isUpTransition(from: string, to: string): boolean {
+  const fromRank = SEVERITY_RANK[from];
+  const toRank = SEVERITY_RANK[to];
+  if (fromRank === undefined || toRank === undefined) return false;
+  return toRank > fromRank;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function floorToDay(ms: number): number {
+  return Math.floor(ms / DAY_MS) * DAY_MS;
+}
+
+/**
+ * Format severity-escalation events into a sparkline payload mirroring
+ * content-engine's `buildSeverityEscalationSparkline()`. Pure / defensive:
+ *   - Future-dated events (ts_ms > nowMs) are dropped.
+ *   - Down-transitions and same-level rows are dropped — only strict
+ *     UP-transitions on the {occasional, frequent, chronic} ladder count.
+ *   - Unknown severity labels are silently dropped (forward-compat).
+ *   - Negative / zero / non-finite windowMs is clamped to a single day
+ *     via `Math.trunc` + `Math.max(DAY_MS, …)` (same bug-fix idiom the
+ *     content-engine helper uses to dodge the 32-bit `windowMs | 0`
+ *     overflow for ≥25-day windows).
+ */
+export function buildSeverityEscalationSparkline(
+  events: SeverityEscalationEvent[],
+  windowMs: number,
+  nowMs: number,
+): SeverityEscalationSparklineData {
+  const truncated = Number.isFinite(windowMs) ? Math.trunc(windowMs) : 0;
+  const safeWindowMs = Math.max(DAY_MS, truncated);
+  const dayCount = Math.max(1, Math.floor(safeWindowMs / DAY_MS));
+  const nowDay = floorToDay(nowMs);
+  const oldestDay = nowDay - (dayCount - 1) * DAY_MS;
+
+  const escalationCounts = new Map<number, number>();
+  for (let i = dayCount - 1; i >= 0; i--) {
+    const dayStart = nowDay - i * DAY_MS;
+    escalationCounts.set(dayStart, 0);
+  }
+
+  let totalEscalations = 0;
+  let lastEscalationMs: number | null = null;
+
+  for (const ev of events) {
+    if (ev.ts_ms < oldestDay) continue;
+    if (ev.ts_ms > nowMs) continue;
+    if (!isUpTransition(ev.from_severity, ev.to_severity)) continue;
+    const key = Math.min(floorToDay(ev.ts_ms), nowDay);
+    escalationCounts.set(key, (escalationCounts.get(key) ?? 0) + 1);
+    totalEscalations++;
+    if (lastEscalationMs === null || ev.ts_ms > lastEscalationMs) {
+      lastEscalationMs = ev.ts_ms;
+    }
+  }
+
+  const points: SeverityEscalationSparklinePoint[] = [];
+  for (let i = dayCount - 1; i >= 0; i--) {
+    const dayStart = nowDay - i * DAY_MS;
+    points.push({
+      dayIso: new Date(dayStart).toISOString(),
+      escalations: escalationCounts.get(dayStart) ?? 0,
+    });
+  }
+
+  return {
+    points,
+    totalEscalations,
+    lastEscalationAt:
+      lastEscalationMs !== null ? new Date(lastEscalationMs).toISOString() : null,
   };
 }
 

@@ -311,6 +311,29 @@ function renderAutoPauseSparkline(
   return `<div class="tile__pause-spark" role="img" aria-label="Auto-pause history (24h)">${bars}</div>`;
 }
 
+/**
+ * Severity escalation sparkline (2026-04-30): renders the 30-bucket
+ * per-day mini-bar inside the severity escalations tile. Each bucket's
+ * intensity is driven by escalation count: 0 = quiet, 1 = warn, 2+ =
+ * critical. Defensive: silently no-ops on missing data so tiles without
+ * the field render unchanged.
+ */
+function renderSeverityEscalationSparkline(
+  data: IntegrationTile['severityEscalationSparkline'],
+): string {
+  if (!data || !Array.isArray(data.points) || data.points.length === 0) return '';
+  const bars = data.points
+    .map((p) => {
+      const escalations =
+        Number.isFinite(p.escalations) && p.escalations > 0 ? p.escalations : 0;
+      const variant = escalations === 0 ? 'quiet' : escalations === 1 ? 'warn' : 'critical';
+      const title = `${escapeHtml(p.dayIso)} · escalations=${escalations}`;
+      return `<span class="tile__esc-bar tile__esc-bar--${variant}" title="${title}" aria-hidden="true"></span>`;
+    })
+    .join('');
+  return `<div class="tile__esc-spark" role="img" aria-label="Severity escalations (30d)">${bars}</div>`;
+}
+
 function renderIntegrationTiles(tiles: IntegrationTile[] | undefined): string {
   if (!tiles || tiles.length === 0) return '';
   const cards = tiles
@@ -336,12 +359,16 @@ function renderIntegrationTiles(tiles: IntegrationTile[] | undefined): string {
         : '';
       const sparkBlock = renderTileSparkline(tile.sparkline);
       const pauseSparkBlock = renderAutoPauseSparkline(tile.autoPauseSparkline);
+      const escSparkBlock = renderSeverityEscalationSparkline(
+        tile.severityEscalationSparkline,
+      );
       const badgesBlock = renderClassificationBadges(tile.classificationCounts);
       const inner = `<div class="tile__title">${title}</div>
         <div class="tile__summary">${summary}</div>
         ${badgesBlock}
         ${detailsBlock}
         ${pauseSparkBlock}
+        ${escSparkBlock}
         ${sparkBlock}
         ${errorBlock}`;
       // Auto-pause history (2026-04-29): tiles with an `href` wrap in <a>

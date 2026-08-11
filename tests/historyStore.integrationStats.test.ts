@@ -6,7 +6,8 @@ function store(now = () => Date.now()): SqliteHistoryStore {
 
 describe('SqliteHistoryStore integration_stats_history', () => {
   it('recordIntegrationStat persists a row and lists by integration', () => {
-    const s = store();
+    // Pin the clock near the hardcoded row dates so the 7-day window never rots
+    const s = store(() => Date.parse('2026-04-20T12:00:00.000Z'));
     s.recordIntegrationStat({
       integration_name: 'po-receiver',
       date: '2026-04-20',
@@ -25,7 +26,7 @@ describe('SqliteHistoryStore integration_stats_history', () => {
   });
 
   it('recordIntegrationStat upserts when same integration+date is stored twice', () => {
-    const s = store();
+    const s = store(() => Date.parse('2026-04-20T12:00:00.000Z'));
     s.recordIntegrationStat({
       integration_name: 'po-receiver',
       date: '2026-04-20',

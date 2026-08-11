@@ -355,7 +355,12 @@ describe('/incidents click-through — auto_resolved=true filter', () => {
   });
 
   it('marks recovery-closed incidents with auto_resolved=1 via IntegrationAlertMonitor', async () => {
-    const store = new SqliteHistoryStore({ filePath: ':memory:' });
+    // Store shares the monitor's pinned clock so the listIncidents 7-day
+    // window never rots away from the hardcoded incident dates.
+    const store = new SqliteHistoryStore({
+      filePath: ':memory:',
+      now: () => Date.parse('2026-04-23T12:00:00Z'),
+    });
     seedHistory(store, 'kanban', [
       { date: '2026-04-23', successRate: 0.95, totalAttempts: 200 },
     ]);

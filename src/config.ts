@@ -33,6 +33,7 @@ export const DEFAULT_APPS: AppConfig[] = [
   { name: 'dearborn-ai-agents', repo: 'dearborndenim/dearborn-ai-agents' },
   { name: 'DDA-CS-Manager', repo: 'dearborndenim/DDA-CS-Manager' },
   { name: 'diamond-pickaxe-returns-processor', repo: 'dearborndenim/diamond-pickaxe-returns-processor' },
+  { name: 'product-dev', repo: 'dearborndenim/product-dev', url: 'https://product-dev-production.up.railway.app' },
 ];
 
 export function parseUrlOverrides(raw: string | undefined): Record<string, string> {

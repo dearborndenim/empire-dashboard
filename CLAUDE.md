@@ -10,23 +10,10 @@ API for last-commit data.
 - `@octokit/rest` for GitHub activity tracking
 - Jest + ts-jest + supertest for tests
 - Server-rendered HTML (escaped template strings in `src/render.ts`) + one CSS file in `src/public/styles.css`
-- No database — everything is in-memory with TTL caches
+- SQLite via `better-sqlite3` (`src/historyStore.ts`) persists incidents, the alert audit log, saved views, and integration stats history; health/activity probe results are cached in memory with TTLs
 
 ## Layout
-```
-src/
-  index.ts            # Entry: wires config, checkers, app, starts polling
-  app.ts              # Express app + collectStatuses()
-  config.ts           # RuntimeConfig loader + DEFAULT_APPS list
-  healthChecker.ts    # HTTP health probes with TTL cache
-  activityTracker.ts  # GitHub last-commit probes with TTL cache
-  status.ts           # combineStatus() + formatHours()
-  render.ts           # renderDashboard() HTML template
-  public/styles.css   # dashboard CSS
-tests/                # unit + integration (supertest) tests
-Dockerfile            # multi-stage node:20-alpine build
-railway.toml          # Railway deploy config
-```
+`src/` — one module per concern. Entry `index.ts` (wires config, checkers, jobs); HTTP in `app.ts`; HTML in `render.ts` + `integrationTiles.ts`; persistence in `historyStore.ts` (SQLite); probes in `healthChecker.ts` / `activityTracker.ts`; alerting in `integrationAlertMonitor.ts` + `alertSender.ts`; scheduled jobs in `scheduler.ts`, `integrationStatsJob.ts`, `weeklyReport.ts`, `alertAuditDigest.ts`. Tests in `tests/`. `Dockerfile` (multi-stage node:20-alpine) + `railway.toml` for deploy.
 
 ## Build / test / run
 ```bash

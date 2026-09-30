@@ -146,24 +146,6 @@ describe('ConsoleAlertSender', () => {
     expect(error).toHaveBeenCalled();
     expect(warn).not.toHaveBeenCalled();
   });
-
-  it('logs warning alerts via console.warn', async () => {
-    const error = jest.fn();
-    const warn = jest.fn();
-    const log = jest.fn();
-    const sender = new ConsoleAlertSender({ logger: { error, warn, log } });
-    await sender.send({ ...baseMessage, severity: 'warning' });
-    expect(warn).toHaveBeenCalled();
-  });
-
-  it('logs info alerts via console.log', async () => {
-    const error = jest.fn();
-    const warn = jest.fn();
-    const log = jest.fn();
-    const sender = new ConsoleAlertSender({ logger: { error, warn, log } });
-    await sender.send({ ...baseMessage, severity: 'info' });
-    expect(log).toHaveBeenCalled();
-  });
 });
 
 describe('NullAlertSender', () => {

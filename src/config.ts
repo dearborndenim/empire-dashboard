@@ -25,11 +25,9 @@ export interface AppConfig {
 export const DEFAULT_APPS: AppConfig[] = [
   { name: 'McSecretary', repo: 'dearborndenim/McSecretary' },
   { name: 'kanban-purchaser', repo: 'dearborndenim/kanban-purchaser' },
-  { name: 'influencer-outreach', repo: 'dearborndenim/influencer-outreach' },
   { name: 'purchase-order-receiver', repo: 'dearborndenim/purchase-order-receiver' },
   { name: 'content-engine', repo: 'dearborndenim/content-engine' },
   { name: 'piece-work-scanner', repo: 'dearborndenim/piece-work-scanner' },
-  { name: 'permitready', repo: 'dearborndenim/chicago-building-code' },
   { name: 'dearborn-ai-agents', repo: 'dearborndenim/dearborn-ai-agents' },
   { name: 'DDA-CS-Manager', repo: 'dearborndenim/DDA-CS-Manager' },
   { name: 'diamond-pickaxe-returns-processor', repo: 'dearborndenim/diamond-pickaxe-returns-processor' },

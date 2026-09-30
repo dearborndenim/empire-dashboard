@@ -48,11 +48,16 @@ Then optionally set `APPS_URL_OVERRIDES` to inject Railway URLs without editing 
 Optional:
 - `GITHUB_OWNER` (default `dearborndenim`)
 - `HEALTH_CACHE_TTL`, `HEALTH_TIMEOUT_MS`, `POLL_INTERVAL_MS`, `PORT`
+- Integration tiles: `PO_RECEIVER_URL`/`_API_KEY`, `KANBAN_URL`/`_API_KEY`, `CONTENT_ENGINE_URL`/`_API_KEY`
+- Alerting: `TEAMS_WEBHOOK_URL`, `ALERTS_DISABLED`, `INTEGRATION_ALERT_COOLDOWN_SECONDS`
+- Email: `SMTP_*`, `EMAIL_DISABLED`, `WEEKLY_REPORT_TO`/`_FROM`, `ALERT_AUDIT_DIGEST_*`, `ALERT_AUDIT_PER_ACTOR_DIGEST*`, `DISABLE_ALERT_AUDIT_*`
+- `APPS_RAILWAY_LOGS_OVERRIDES` — JSON map of app name to Railway logs URL
+- Storage: `HISTORY_DB_PATH`, `HISTORY_RETENTION_DAYS`, `INCIDENTS_RETENTION_DAYS`
 
 ## Test strategy
-Every module has a unit test. `app.test.ts` uses supertest to hit all three
-HTTP endpoints plus the error paths. Fakes/mocks are used for `fetch` and
-Octokit so no tests hit the network. Coverage is enforced at 80% lines /
+Every module except `index.ts` has tests. Route tests (`app*.test.ts` and the
+feature suites) use supertest against the Express app, including error paths.
+Fakes/mocks are used for `fetch` and Octokit so no tests hit the network. Coverage is enforced at 80% lines /
 70% branches in `package.json`.
 
 ## Admin endpoints (INCIDENTS_ADMIN_TOKEN gated)

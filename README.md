@@ -23,7 +23,7 @@ which have had recent development activity.
 
 ```bash
 npm install
-npm test          # 57 tests, ~98% statement coverage
+npm test          # jest with coverage thresholds
 npm run build
 npm start
 ```

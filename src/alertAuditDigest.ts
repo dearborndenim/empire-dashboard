@@ -25,6 +25,7 @@
 import { AlertAuditRow, HistoryStore, deriveAlertDecision } from './historyStore';
 import { ConsoleEmailSender, EmailMessage, EmailSender } from './email';
 import { computeSavedViewCounts, SavedViewCountCache } from './savedViewCounts';
+import { escapeHtml } from './render';
 
 export interface AlertAuditDigestIntegrationRow {
   integration_name: string;
@@ -227,15 +228,6 @@ export function renderAlertAuditDigestText(data: AlertAuditDigestData): string {
     lines.push('');
   }
   return lines.join('\n');
-}
-
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }
 
 export function renderAlertAuditDigestHtml(data: AlertAuditDigestData): string {
